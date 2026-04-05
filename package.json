@@ -1,0 +1,23 @@
+{
+  "name": "polytrack-server",
+  "version": "1.0.0",
+  "description": "Polymarket smart wallet tracker & auto-copy trading backend",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start":   "node server.js",
+    "dev":     "node --watch server.js",
+    "setup":   "node setup.js"
+  },
+  "dependencies": {
+    "chalk":       "^5.3.0",
+    "cors":        "^2.8.5",
+    "dotenv":      "^16.4.5",
+    "ethers":      "^6.13.2",
+    "express":     "^4.19.2",
+    "node-cron":   "^3.0.3",
+    "node-fetch":  "^3.3.2",
+    "socket.io":   "^4.7.5",
+    "ws":          "^8.18.0"
+  }
+}
