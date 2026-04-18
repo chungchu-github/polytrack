@@ -1,0 +1,67 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --color-primary: #F59E0B;
+    --color-accent: #8B5CF6;
+    --color-bg: #0F172A;
+  }
+
+  body {
+    font-family: "JetBrains Mono", monospace;
+  }
+
+  /* Scrollbar styling */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #1E293B;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #475569;
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #64748B;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-lg border border-surface-700 bg-surface-800/80 backdrop-blur-sm p-4;
+  }
+  .card-header {
+    @apply font-display text-sm font-semibold uppercase tracking-wider text-surface-400 mb-3;
+  }
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-semibold text-surface-900 transition-colors hover:bg-primary-400 active:bg-primary-600 disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium text-surface-300 transition-colors hover:bg-surface-700 hover:text-surface-50 active:bg-surface-600;
+  }
+  .btn-danger {
+    @apply inline-flex items-center justify-center gap-2 rounded-md bg-danger/10 px-4 py-2 text-sm font-semibold text-danger transition-colors hover:bg-danger/20 active:bg-danger/30;
+  }
+  .badge {
+    @apply inline-flex items-center rounded-full px-2 py-0.5 text-2xs font-semibold uppercase tracking-wider;
+  }
+  .badge-elite {
+    @apply badge bg-primary/15 text-primary;
+  }
+  .badge-pro {
+    @apply badge bg-accent/15 text-accent;
+  }
+  .badge-basic {
+    @apply badge bg-surface-600/30 text-surface-400;
+  }
+  .stat-value {
+    @apply font-display text-2xl font-bold tabular-nums;
+  }
+  .stat-label {
+    @apply text-xs text-surface-400 uppercase tracking-wider;
+  }
+}

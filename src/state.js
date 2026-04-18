@@ -1,0 +1,128 @@
+/**
+ * State Management with DB Persistence
+ * ─────────────────────────────────────
+ * In-memory state backed by SQLite. Writes through to DB on every mutation.
+ * On startup, hydrates from DB so state survives restarts.
+ */
+
+import { SignalStore } from "./signals.js";
+import { StrategyEngine } from "./strategies/engine.js";
+import { loadConfig } from "./config.js";
+import * as db from "./db.js";
+
+export function createState(config = {}) {
+  const cfg = loadConfig();
+  const engine = new StrategyEngine(cfg.strategies || {});
+  // Keep signalStore alias pointing at the consensus strategy's SignalStore
+  // so existing call sites (getSignals, markTraded) keep working.
+  const consensus = engine.get("consensus");
+  const signalStore = consensus?.store || new SignalStore({
+    minWallets: config.minWallets || 3,
+    recencyDays: config.recencyDays || 7,
+    minPositionSize: config.minPositionSize || 10,
+  });
+  return {
+    wallets: new Map(),
+    markets: [],
+    strategyEngine: engine,
+    signalStore,
+    signals: [],
+    autoTrades: [],
+    autoEnabled: false,
+    lastScan: null,
+    polyWs: null,
+    scanning: false,
+  };
+}
+
+// ── Hydrate from DB on startup ───────────────────────────────────────────────
+
+export function hydrateFromDB(state) {
+  // Restore wallets
+  const rows = db.getAllWallets();
+  for (const row of rows) {
+    state.wallets.set(row.address, {
+      addr:            row.address,
+      score:           row.score,
+      tier:            row.tier,
+      winRate:         row.win_rate,
+      roi:             row.roi,
+      sharpe:          row.sharpe,
+      maxDrawdown:     row.max_drawdown,
+      timing:          row.timing_score,
+      consistency:     row.consistency,
+      totalPnL:        row.total_pnl,
+      volume:          row.total_volume,
+      closedPositions: row.closed_positions,
+      openPositions:   row.open_positions,
+      trades:          row.trade_count,
+      positions:       [],       // positions are large; loaded on demand
+      recentTrades:    [],       // same — loaded on demand
+      updatedAt:       row.last_scored,
+    });
+  }
+
+  // Restore trades
+  state.autoTrades = db.getRecentTrades(100).map(row => ({
+    conditionId: row.condition_id,
+    title:       row.title,
+    direction:   row.direction,
+    tokenId:     row.token_id,
+    midPrice:    row.mid_price,
+    limitPrice:  row.limit_price,
+    size:        row.size_usdc,
+    orderId:     row.order_id,
+    status:      row.status,
+    error:       row.error_message,
+    txHash:      row.tx_hash,
+    walletCount: row.wallet_count,
+    strength:    row.strength,
+    executedAt:  row.created_at,
+  }));
+
+  // Restore last scan time
+  const lastScan = db.getLastScan();
+  if (lastScan?.completed_at) {
+    state.lastScan = new Date(lastScan.completed_at);
+  }
+
+  return state;
+}
+
+// ── State Helpers (write-through to DB) ──────────────────────────────────────
+
+export function getWalletList(state) {
+  return [...state.wallets.values()].sort((a, b) => b.score - a.score);
+}
+
+export function getEliteWallets(state) {
+  return [...state.wallets.values()].filter(w => w.tier === "ELITE");
+}
+
+export function setWallet(state, wallet) {
+  state.wallets.set(wallet.addr, wallet);
+  db.upsertWallet(wallet);
+}
+
+export function addTrade(state, trade, maxHistory = 100) {
+  state.autoTrades.unshift(trade);
+  state.autoTrades = state.autoTrades.slice(0, maxHistory);
+  db.insertTrade(trade);
+}
+
+export function getSignals(state) {
+  // Prefer the combined multi-strategy signal list when available; fall back
+  // to consensus-only for tests that don't drive through the engine.
+  if (Array.isArray(state.signals) && state.signals.length > 0) return state.signals;
+  return state.signalStore.getActiveSignals();
+}
+
+// ── Scan lifecycle helpers ───────────────────────────────────────────────────
+
+export function beginScan() {
+  return db.startScan();
+}
+
+export function endScan(scanId, stats) {
+  db.completeScan(scanId, stats);
+}
