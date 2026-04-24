@@ -70,6 +70,19 @@ const SLIPPAGE_PCT    = Number(process.env.SLIPPAGE_PCT || 2);
 const SCAN_INTERVAL   = Number(process.env.SCAN_INTERVAL || 60);
 const FAILURE_BREAKER_THRESHOLD = Number(process.env.FAILURE_BREAKER_THRESHOLD || 3);
 
+// Startup safety — refuse to run in production without an API token.
+// Without API_TOKEN, requireAuth() lets everything through (intentional for
+// local dev). A production server without a token is a publicly-exposed
+// wallet controller, so crash loudly instead of silently accepting traffic.
+if (process.env.NODE_ENV === "production" && !API_TOKEN) {
+  // eslint-disable-next-line no-console
+  console.error(
+    "[polytrack] FATAL: API_TOKEN env var is required when NODE_ENV=production. " +
+    "Generate one with `openssl rand -hex 32` and set it in .env."
+  );
+  process.exit(1);
+}
+
 // Trade execution circuit breaker — trips autoEnabled=false after N consecutive failures
 let tradeFailureStreak = 0;
 
