@@ -42,7 +42,7 @@ import {
 } from "./state.js";
 import {
   initDB, closeDB, getStats as getDBStats, getStalePendingTrades,
-  updateTradeStatus, getDataCaptureStats,
+  updateTradeStatus, getDataCaptureStats, vacuumDB,
 } from "./db.js";
 import log, { logger } from "./logger.js";
 import { initMonitoring, captureException, flushMonitoring } from "./monitoring.js";
@@ -1072,6 +1072,21 @@ cron.schedule("0 3 * * *", () => {
       else log.warn(`backup-db failed (code ${code}): ${err.trim() || out.trim()}`);
     });
   }).catch((e) => log.warn(`backup-db spawn error: ${e.message}`));
+});
+
+// Weekly VACUUM at Sun 04:00 — reclaims disk space left behind by pruned
+// snapshot rows. Sits after the 03:00 backup and 03:17 prune so it operates
+// on a freshly-pruned, already-backed-up DB.
+cron.schedule("0 4 * * 0", () => {
+  try {
+    const r = vacuumDB();
+    const mbBefore = (r.bytesBefore / 1048576).toFixed(1);
+    const mbAfter  = (r.bytesAfter  / 1048576).toFixed(1);
+    const mbFreed  = (r.freedBytes  / 1048576).toFixed(1);
+    log.db(`VACUUM ok — ${mbBefore} MB → ${mbAfter} MB (freed ${mbFreed} MB) in ${r.durationMs}ms`);
+  } catch (e) {
+    log.warn(`VACUUM failed: ${e.message}`);
+  }
 });
 
 // ── Error Handlers ───────────────────────────────────────────────────────────
