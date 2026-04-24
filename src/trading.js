@@ -242,6 +242,29 @@ export async function buildOrder(params) {
 // ── Fill Verification ────────────────────────────────────────────────────────
 
 /**
+ * Map a raw CLOB order status into our canonical trade-status vocabulary.
+ * Shared between the live polling path (verifyFill) and the boot-time
+ * reconciliation path (sweepStaleOrders), so both agree on what each
+ * CLOB status actually means.
+ *
+ * Returns one of: "FILLED" | "PARTIAL" | "CANCELLED" | "EXPIRED" |
+ *                 "REJECTED" | "OPEN" | "UNKNOWN"
+ *
+ * - "OPEN" means the order is still live on the book.
+ * - "UNKNOWN" means we got no answer (API down, bad ID, etc.) — callers
+ *   should NOT mutate DB state on this.
+ */
+export function classifyClobOrderStatus(rawStatus) {
+  if (rawStatus == null || rawStatus === "") return "UNKNOWN";
+  const s = String(rawStatus).toUpperCase();
+  if (s === "MATCHED" || s === "FILLED" || s === "MINED") return "FILLED";
+  if (s === "PARTIAL" || s === "PARTIALLY_FILLED")        return "PARTIAL";
+  if (s === "CANCELLED" || s === "EXPIRED" || s === "REJECTED") return s;
+  if (s === "LIVE" || s === "OPEN" || s === "SUBMITTED" || s === "PENDING") return "OPEN";
+  return "UNKNOWN";
+}
+
+/**
  * Poll order status to verify fill. Returns final status.
  *
  * @param {string} orderId

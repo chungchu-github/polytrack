@@ -20,6 +20,7 @@ import {
   buildOrder, buildUnsignedOrder, signOrder, wrapOrderPayload,
   getExchangeDomain, ORDER_TYPES,
   EXCHANGE_V2_ADDRESS, NEG_RISK_EXCHANGE_ADDRESS,
+  classifyClobOrderStatus,
 } from "../src/trading.js";
 
 const TEST_WALLET = ethers.Wallet.createRandom();
@@ -322,5 +323,37 @@ describe("F1 — signOrder + wrapOrderPayload round-trip", () => {
     assert.equal(manual.order.signer, TEST_WALLET.address);
     assert.equal(manual.order.signatureType, 1);
     assert.ok(/^0x[0-9a-f]{130}$/i.test(manual.order.signature), "signature 65-byte hex");
+  });
+});
+
+describe("classifyClobOrderStatus (reconciliation)", () => {
+  it("maps fill-family statuses to FILLED", () => {
+    for (const s of ["matched", "MATCHED", "filled", "FILLED", "mined", "MINED"]) {
+      assert.equal(classifyClobOrderStatus(s), "FILLED", `"${s}" should map to FILLED`);
+    }
+  });
+
+  it("maps partial-family statuses to PARTIAL", () => {
+    assert.equal(classifyClobOrderStatus("partial"), "PARTIAL");
+    assert.equal(classifyClobOrderStatus("partially_filled"), "PARTIAL");
+  });
+
+  it("preserves cancelled / expired / rejected verbatim", () => {
+    assert.equal(classifyClobOrderStatus("cancelled"), "CANCELLED");
+    assert.equal(classifyClobOrderStatus("EXPIRED"),   "EXPIRED");
+    assert.equal(classifyClobOrderStatus("rejected"),  "REJECTED");
+  });
+
+  it("maps open/live/pending to OPEN", () => {
+    for (const s of ["live", "open", "submitted", "pending"]) {
+      assert.equal(classifyClobOrderStatus(s), "OPEN", `"${s}" should map to OPEN`);
+    }
+  });
+
+  it("returns UNKNOWN for null, empty, or unrecognised input", () => {
+    assert.equal(classifyClobOrderStatus(null),        "UNKNOWN");
+    assert.equal(classifyClobOrderStatus(undefined),   "UNKNOWN");
+    assert.equal(classifyClobOrderStatus(""),          "UNKNOWN");
+    assert.equal(classifyClobOrderStatus("moon_gas"),  "UNKNOWN");
   });
 });

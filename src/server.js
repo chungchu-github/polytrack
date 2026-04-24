@@ -21,13 +21,14 @@ import pinoHttp from "pino-http";
 import {
   fetchMarkets, fetchWalletTrades, fetchWalletPositions,
   fetchLeaderboard, proxyFetch, cancelOrder, fetchMidPrice, fetchOrderBook,
-  submitOrder, CLOB_WS,
+  submitOrder, fetchOrderStatus, CLOB_WS,
 } from "./polymarket-api.js";
 import { loadConfig, saveConfig } from "./config.js";
 import { scoreWallet } from "./scoring.js";
 import {
   executeCopyTrade, resolveTokenId, preflightCheck,
   buildUnsignedOrder, wrapOrderPayload,
+  classifyClobOrderStatus,
 } from "./trading.js";
 import { checkResolutions, getSignalAccuracy } from "./resolution.js";
 import { checkRiskLimits, getRiskSnapshot } from "./risk.js";
@@ -984,19 +985,39 @@ io.on("connection", sock => {
   sock.on("disconnect", () => log.info(`Frontend disconnected: ${sock.id}`));
 });
 
-// ── Stale Order Sweep ────────────────────────────────────────────────────────
+// ── Stale Order Reconciliation ───────────────────────────────────────────────
+// On boot we may see trades still marked PENDING/SUBMITTED because the process
+// died after placing the order but before recording the fill. Read CLOB first,
+// then decide — a filled order that we blindly "cancel" leaves the DB saying
+// "we never traded" while the position lives on-chain (phantom exposure).
 async function sweepStaleOrders() {
   const stale = getStalePendingTrades(5 * 60_000);
   if (stale.length === 0) return;
-  log.info(`Sweeping ${stale.length} stale pending trade(s)…`);
+  log.info(`Reconciling ${stale.length} stale pending trade(s)…`);
   for (const t of stale) {
     try {
-      const res = await cancelOrder(t.order_id, {});
-      const newStatus = res.ok ? "CANCELLED" : "STALE";
+      const order = await fetchOrderStatus(t.order_id);
+      const classified = classifyClobOrderStatus(order?.status);
+
+      let newStatus;
+      if (classified === "FILLED" || classified === "PARTIAL") {
+        newStatus = classified;
+      } else if (classified === "CANCELLED" || classified === "EXPIRED" || classified === "REJECTED") {
+        newStatus = classified;
+      } else if (classified === "OPEN") {
+        const res = await cancelOrder(t.order_id, {});
+        newStatus = res.ok ? "CANCELLED" : "STALE";
+      } else {
+        // UNKNOWN — CLOB API unreachable or returned something we don't
+        // recognise. Leave DB alone rather than guess.
+        log.warn(`  #${t.id} ${t.order_id?.slice(0, 10)}… unresolved (CLOB returned ${order?.status ?? "null"}) — keeping as-is`);
+        continue;
+      }
+
       updateTradeStatus(t.id, newStatus, Date.now());
       log.info(`  #${t.id} ${t.order_id?.slice(0, 10)}… → ${newStatus}`);
     } catch (e) {
-      log.warn(`  #${t.id} sweep failed: ${e.message}`);
+      log.warn(`  #${t.id} reconcile failed: ${e.message}`);
     }
   }
 }
