@@ -11,6 +11,8 @@ import {
   startScan, completeScan, getLastScan, getStats,
   resolveSignal, getSignalAccuracy,
   insertMarketSnapshot, insertPositionSnapshot, getDataCaptureStats,
+  insertWalletTier, getWalletTierAt,
+  getTradesPnlByStrategy,
 } from "../src/db.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -224,6 +226,120 @@ describe("getDataCaptureStats (V1 gate)", () => {
     insertMarketSnapshot({ conditionId: "cap_c3", tokenId: "t3", timestamp: Date.now() - 3 * 3600_000, midPrice: 0.5 });
     const s = getDataCaptureStats();
     assert.equal(s.healthy, false);
+  });
+});
+
+// ── Wallet Tier History (V7 — N1 survivorship fix) ──────────────────────────
+
+describe("wallet_tier_history (V7)", () => {
+  const ADDR = "0xtier0000000000000000000000000000000000";
+
+  it("insertWalletTier writes a row on first observation", () => {
+    const wrote = insertWalletTier({ address: ADDR, tier: "BASIC", score: 20, scoredAt: 1000 });
+    assert.equal(wrote, true);
+    assert.equal(getWalletTierAt(ADDR, 1000), "BASIC");
+  });
+
+  it("insertWalletTier is a no-op when tier is unchanged", () => {
+    const wrote = insertWalletTier({ address: ADDR, tier: "BASIC", score: 22, scoredAt: 2000 });
+    assert.equal(wrote, false);
+  });
+
+  it("insertWalletTier records new row on tier transition", () => {
+    const wrote = insertWalletTier({ address: ADDR, tier: "ELITE", score: 80, scoredAt: 3000 });
+    assert.equal(wrote, true);
+  });
+
+  it("getWalletTierAt returns the most recent row at-or-before t", () => {
+    assert.equal(getWalletTierAt(ADDR, 500),  null,    "no row before first insert");
+    assert.equal(getWalletTierAt(ADDR, 1500), "BASIC", "t=1500 sees BASIC (from t=1000)");
+    assert.equal(getWalletTierAt(ADDR, 3500), "ELITE", "t=3500 sees ELITE (from t=3000)");
+    assert.equal(getWalletTierAt(ADDR, 2999), "BASIC", "boundary: t=2999 still BASIC");
+  });
+
+  it("upsertWallet hooks into tier_history automatically", () => {
+    const newAddr = "0xhook0000000000000000000000000000000000";
+    upsertWallet({
+      addr: newAddr, score: 10, tier: "BASIC", winRate: 0, roi: 0, sharpe: 0,
+      maxDrawdown: 0, timing: 0, consistency: 0, totalPnL: 0, volume: 0,
+      closedPositions: 0, openPositions: 0, trades: 0,
+    });
+    assert.equal(getWalletTierAt(newAddr, Date.now() + 1000), "BASIC");
+  });
+});
+
+// ── F2 — PnL by Strategy ────────────────────────────────────────────────────
+
+describe("getTradesPnlByStrategy (F2)", () => {
+  it("aggregates realized PnL, wins, losses, and open exposure per strategy", () => {
+    const db = getDB();
+    db.exec("DELETE FROM trades; DELETE FROM signals;");
+
+    // Two signals for two strategies
+    const sigWin = db.prepare(
+      `INSERT INTO signals (condition_id, direction, strength, status, first_seen,
+        last_confirmed, resolved_direction, resolved_at, strategy)
+        VALUES ('cA', 'YES', 80, 'CONFIRMED', 1, 1, 'YES', 2, 'momentum')`
+    ).run().lastInsertRowid;
+
+    const sigLoss = db.prepare(
+      `INSERT INTO signals (condition_id, direction, strength, status, first_seen,
+        last_confirmed, resolved_direction, resolved_at, strategy)
+        VALUES ('cB', 'YES', 80, 'CONFIRMED', 1, 1, 'NO', 2, 'meanrev')`
+    ).run().lastInsertRowid;
+
+    const sigOpen = db.prepare(
+      `INSERT INTO signals (condition_id, direction, strength, status, first_seen,
+        last_confirmed, strategy)
+        VALUES ('cC', 'YES', 80, 'CONFIRMED', 1, 1, 'momentum')`
+    ).run().lastInsertRowid;
+
+    // Fills at 0.5 each, $100 each
+    const stmt = db.prepare(
+      `INSERT INTO trades (signal_id, condition_id, direction, size_usdc,
+        limit_price, status, created_at)
+        VALUES (?, ?, 'YES', 100, 0.5, 'FILLED', ?)`
+    );
+    stmt.run(sigWin,  "cA", 1000);
+    stmt.run(sigLoss, "cB", 1000);
+    stmt.run(sigOpen, "cC", 1000);
+
+    // Unfilled — must be ignored for PnL but counted in tradeCount
+    db.prepare(
+      `INSERT INTO trades (signal_id, condition_id, direction, size_usdc,
+        limit_price, status, created_at)
+        VALUES (?, 'cA', 'YES', 100, 0.5, 'PENDING', 1001)`
+    ).run(sigWin);
+
+    const rows = getTradesPnlByStrategy();
+    const byStrategy = Object.fromEntries(rows.map(r => [r.strategy, r]));
+
+    // momentum: 1 win (+$100 at 0.5 fill) + 1 open ($100 exposure) + 1 pending
+    assert.equal(byStrategy.momentum.tradeCount,       3);
+    assert.equal(byStrategy.momentum.filledCount,      2);
+    assert.equal(byStrategy.momentum.wins,             1);
+    assert.equal(byStrategy.momentum.losses,           0);
+    assert.equal(byStrategy.momentum.realizedPnl,      100);   // $100 * (1/0.5 − 1) = $100
+    assert.equal(byStrategy.momentum.openExposureUsdc, 100);
+
+    // meanrev: 1 loss → −$100
+    assert.equal(byStrategy.meanrev.wins,              0);
+    assert.equal(byStrategy.meanrev.losses,            1);
+    assert.equal(byStrategy.meanrev.realizedPnl,       -100);
+    assert.equal(byStrategy.meanrev.winRate,           0);
+  });
+
+  it("buckets trades with no signal_id under 'manual'", () => {
+    const db = getDB();
+    db.exec("DELETE FROM trades;");
+    db.prepare(
+      `INSERT INTO trades (condition_id, direction, size_usdc, limit_price,
+        status, created_at) VALUES ('cM', 'YES', 50, 0.4, 'FILLED', 1)`
+    ).run();
+    const rows = getTradesPnlByStrategy();
+    const manual = rows.find(r => r.strategy === "manual");
+    assert.ok(manual, "expected a 'manual' bucket");
+    assert.equal(manual.tradeCount, 1);
   });
 });
 

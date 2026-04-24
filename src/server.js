@@ -50,6 +50,7 @@ import { HistoryReader } from "./backtest/history.js";
 import { runBacktest } from "./backtest/engine.js";
 import {
   insertBacktest, completeBacktest, getBacktest, listBacktests, deleteBacktest,
+  getTradesPnlByStrategy,
 } from "./db.js";
 
 dotenv.config();
@@ -511,6 +512,16 @@ app.get("/signals", requireAuth, (_, res) => res.json(getSignals(state)));
 
 // Get trade log (public)
 app.get("/trades", requireAuth, (_, res) => res.json(state.autoTrades));
+
+// F2 — realized PnL + open exposure broken out by strategy
+app.get("/stats/pnl-by-strategy", requireAuth, (_, res) => {
+  try {
+    res.json(getTradesPnlByStrategy());
+  } catch (e) {
+    log.warn(`getTradesPnlByStrategy failed: ${e.message}`);
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // Toggle auto-copy (auth required)
 app.post("/auto", requireAuth, (req, res) => {

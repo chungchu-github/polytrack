@@ -47,6 +47,8 @@ export const api = {
   listBacktests:   ()       => request("/backtests"),
   getBacktest:     (id)     => request(`/backtest/${id}`),
   deleteBacktest:  (id)     => request(`/backtest/${id}`, { method: "DELETE" }),
+  // F2 per-strategy PnL attribution
+  getPnlByStrategy: ()      => request("/stats/pnl-by-strategy"),
 
   // V2 Gate — edge validation across all strategies
   validateEdge:    (params = {}) => request("/validate-edge", {

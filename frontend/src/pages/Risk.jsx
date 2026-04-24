@@ -21,6 +21,11 @@ export default function Risk() {
     queryFn: api.getTrades,
     refetchInterval: 10_000,
   });
+  const { data: pnlByStrategy = [] } = useQuery({
+    queryKey: ["pnl-by-strategy"],
+    queryFn: api.getPnlByStrategy,
+    refetchInterval: 30_000,
+  });
 
   const risk = health?.risk || {};
   const accuracy = health?.signalAccuracy || {};
@@ -261,6 +266,63 @@ export default function Risk() {
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+      </div>
+
+      {/* F2: Realized PnL + open exposure by strategy */}
+      <div className="card">
+        <h2 className="card-header">P&amp;L by Strategy</h2>
+        {pnlByStrategy.length === 0 ? (
+          <p className="text-sm text-surface-500">No resolved trades yet — PnL will appear after signals resolve.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-2xs uppercase tracking-wider text-surface-500 text-left">
+                  <th className="py-2 pr-3 font-normal">Strategy</th>
+                  <th className="py-2 pr-3 font-normal tabular-nums text-right">Resolved</th>
+                  <th className="py-2 pr-3 font-normal tabular-nums text-right">Win-rate</th>
+                  <th className="py-2 pr-3 font-normal tabular-nums text-right">Realized PnL</th>
+                  <th className="py-2 font-normal tabular-nums text-right">Open</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pnlByStrategy.map((r) => {
+                  const pnlPositive = r.realizedPnl > 0;
+                  const pnlNegative = r.realizedPnl < 0;
+                  return (
+                    <tr key={r.strategy} className="border-t border-surface-800">
+                      <td className={clsx("py-2 pr-3 font-medium", STRAT_COLORS[r.strategy] || "text-surface-300")}>
+                        {r.strategy}
+                      </td>
+                      <td className="py-2 pr-3 tabular-nums text-right text-surface-200">
+                        {r.resolvedCount}
+                        <span className="text-2xs text-surface-500 ml-1">/ {r.filledCount}</span>
+                      </td>
+                      <td className="py-2 pr-3 tabular-nums text-right text-surface-200">
+                        {r.winRate == null ? "—" : `${r.winRate}%`}
+                      </td>
+                      <td className={clsx(
+                        "py-2 pr-3 tabular-nums text-right font-medium",
+                        pnlPositive && "text-success",
+                        pnlNegative && "text-danger",
+                        !pnlPositive && !pnlNegative && "text-surface-400",
+                      )}>
+                        {pnlPositive ? "+" : ""}${r.realizedPnl.toFixed(2)}
+                      </td>
+                      <td className="py-2 tabular-nums text-right text-surface-400">
+                        ${r.openExposureUsdc.toFixed(0)}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <p className="text-2xs text-surface-600 mt-3">
+              Realized PnL = Σ filled trades settled against <code>resolved_direction</code>.
+              Open exposure = filled but unresolved. Win-rate is resolved trades only.
+            </p>
           </div>
         )}
       </div>

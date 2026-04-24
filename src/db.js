@@ -33,6 +33,7 @@ export function initDB(dbPath) {
   migrateV4();
   migrateV5();
   migrateV6();
+  migrateV7();
   return db;
 }
 
@@ -232,6 +233,43 @@ function migrateV6() {
   }
 }
 
+// ── Schema Migration v7 — N1 wallet tier history (survivorship fix) ─────────
+// Records each tier transition so backtests can query "what tier was wallet X
+// at time t" instead of treating every historical wallet as ELITE. On first
+// install we backfill one row per existing wallet from the current tier +
+// last_scored_at, so backtests over pre-V7 data still behave reasonably.
+function migrateV7() {
+  const existed = db.prepare(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name='wallet_tier_history'"
+  ).get();
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS wallet_tier_history (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      wallet_address  TEXT NOT NULL,
+      tier            TEXT NOT NULL,
+      score           INTEGER,
+      scored_at       INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_wallet_tier_history_addr_at
+      ON wallet_tier_history(wallet_address, scored_at);
+  `);
+
+  if (existed) return;
+  // Fresh table — backfill current tiers so pre-V7 snapshots aren't left
+  // tier-less. Uses `last_scored` as the "known from" timestamp.
+  const rows = db.prepare(
+    "SELECT address, tier, score, last_scored FROM wallets WHERE last_scored IS NOT NULL"
+  ).all();
+  const ins = db.prepare(
+    "INSERT INTO wallet_tier_history (wallet_address, tier, score, scored_at) VALUES (?, ?, ?, ?)"
+  );
+  const tx = db.transaction((list) => {
+    for (const r of list) ins.run(r.address, r.tier || "BASIC", r.score || 0, r.last_scored);
+  });
+  tx(rows);
+}
+
 export function insertBacktest(row) {
   const r = db.prepare(`
     INSERT INTO backtests (name, date_start, date_end, strategy, config_json,
@@ -414,10 +452,11 @@ const upsertWalletStmt = () => db.prepare(`
 
 export function upsertWallet(wallet) {
   const now = Date.now();
+  const tier = wallet.tier || "BASIC";
   upsertWalletStmt().run({
     address:          wallet.addr,
     score:            wallet.score || 0,
-    tier:             wallet.tier || "BASIC",
+    tier,
     win_rate:         wallet.winRate || 0,
     roi:              wallet.roi || 0,
     sharpe:           wallet.sharpe || 0,
@@ -432,6 +471,39 @@ export function upsertWallet(wallet) {
     first_seen:       now,
     last_scored:      now,
   });
+  // N1 survivorship fix: record tier transition (no-op when tier unchanged)
+  insertWalletTier({ address: wallet.addr, tier, score: wallet.score || 0, scoredAt: now });
+}
+
+// ── Wallet Tier History (N1 survivorship fix) ────────────────────────────────
+
+/**
+ * Append a tier observation, but only if it differs from this wallet's most
+ * recent tier — keeps the table small (tier transitions, not a row per scan).
+ * @returns {boolean} true if a row was written
+ */
+export function insertWalletTier({ address, tier, score = 0, scoredAt }) {
+  if (!address || !tier || !scoredAt) return false;
+  const last = db.prepare(
+    "SELECT tier FROM wallet_tier_history WHERE wallet_address = ? ORDER BY scored_at DESC LIMIT 1"
+  ).get(address);
+  if (last && last.tier === tier) return false;
+  db.prepare(
+    "INSERT INTO wallet_tier_history (wallet_address, tier, score, scored_at) VALUES (?, ?, ?, ?)"
+  ).run(address, tier, score, scoredAt);
+  return true;
+}
+
+/**
+ * Return the wallet's tier as observed at or before `t`. Falls back to null
+ * when no history exists (callers decide the default — we use "ELITE" in the
+ * backtest reader to preserve pre-V7 behaviour on backfilled data).
+ */
+export function getWalletTierAt(address, t) {
+  const row = db.prepare(
+    "SELECT tier FROM wallet_tier_history WHERE wallet_address = ? AND scored_at <= ? ORDER BY scored_at DESC LIMIT 1"
+  ).get(address, t);
+  return row ? row.tier : null;
 }
 
 export function getAllWallets() {
@@ -502,6 +574,67 @@ export function getSignalAccuracy(strategy) {
     base + " AND resolved_direction = direction" + filter
   ).get(...args).count;
   return { total, correct, accuracy: total > 0 ? Math.round((correct / total) * 1000) / 10 : null };
+}
+
+/**
+ * F2 — aggregate realized PnL, open exposure, and trade counts by strategy.
+ * Joins trades → signals via signal_id so each FILLED trade inherits the
+ * strategy that produced its parent signal.
+ *
+ * PnL model (binary outcome, FOK fills):
+ *   win  → (size_usdc / limit_price) − size_usdc  = size * (1/limit − 1)
+ *   loss → −size_usdc
+ *   unresolved → counted as open_exposure_usdc (not PnL)
+ *
+ * Trades with no signal_id (manual /trade calls) fall into the "manual"
+ * bucket so they stay visible rather than silently dropped.
+ */
+export function getTradesPnlByStrategy() {
+  return db.prepare(`
+    SELECT
+      COALESCE(s.strategy, 'manual') AS strategy,
+      COUNT(t.id) AS trade_count,
+      SUM(CASE WHEN t.status = 'FILLED' THEN 1 ELSE 0 END) AS filled_count,
+      SUM(CASE
+            WHEN t.status = 'FILLED'
+             AND s.resolved_direction = t.direction
+             AND t.limit_price > 0
+            THEN t.size_usdc * (1.0 / t.limit_price - 1.0)
+            WHEN t.status = 'FILLED'
+             AND s.resolved_direction IS NOT NULL
+             AND s.resolved_direction <> t.direction
+            THEN -t.size_usdc
+            ELSE 0
+          END) AS realized_pnl,
+      SUM(CASE
+            WHEN t.status = 'FILLED' AND s.resolved_direction IS NULL
+            THEN t.size_usdc
+            ELSE 0
+          END) AS open_exposure_usdc,
+      SUM(CASE
+            WHEN t.status = 'FILLED' AND s.resolved_direction = t.direction THEN 1 ELSE 0
+          END) AS wins,
+      SUM(CASE
+            WHEN t.status = 'FILLED' AND s.resolved_direction IS NOT NULL
+             AND s.resolved_direction <> t.direction THEN 1 ELSE 0
+          END) AS losses
+    FROM trades t
+    LEFT JOIN signals s ON t.signal_id = s.id
+    GROUP BY strategy
+    ORDER BY trade_count DESC
+  `).all().map(r => ({
+    strategy:           r.strategy,
+    tradeCount:         r.trade_count,
+    filledCount:        r.filled_count,
+    realizedPnl:        Math.round((r.realized_pnl || 0) * 100) / 100,
+    openExposureUsdc:   Math.round((r.open_exposure_usdc || 0) * 100) / 100,
+    wins:               r.wins,
+    losses:             r.losses,
+    resolvedCount:      r.wins + r.losses,
+    winRate:            (r.wins + r.losses) > 0
+      ? Math.round((r.wins / (r.wins + r.losses)) * 1000) / 10
+      : null,
+  }));
 }
 
 // ── Trade Queries ────────────────────────────────────────────────────────────
