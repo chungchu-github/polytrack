@@ -46,6 +46,7 @@ import {
 } from "./db.js";
 import log, { logger } from "./logger.js";
 import { initMonitoring, captureException, flushMonitoring } from "./monitoring.js";
+import { checkClockSkew } from "./time-check.js";
 import { captureMarketSnapshot, captureWalletPositions, pruneOldSnapshots } from "./datacapture.js";
 import { HistoryReader } from "./backtest/history.js";
 import { runBacktest } from "./backtest/engine.js";
@@ -126,6 +127,19 @@ app.use(pinoHttp({ logger, autoLogging: { ignore: (req) => req.url === "/health"
 const proxyLimiter = rateLimit({ windowMs: 60_000, max: 60, message: { error: "Rate limited" } });
 const tradeLimiter = rateLimit({ windowMs: 60_000, max: 5,  message: { error: "Rate limited" } });
 const scanLimiter  = rateLimit({ windowMs: 60_000, max: 2,  message: { error: "Rate limited" } });
+
+// Global safety net — blunts brute-force token guessing and runaway clients.
+// /health stays unlimited so uptime monitors can poll freely; /assets/* is
+// skipped so the SPA keeps loading even if the API is under pressure.
+const globalLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.path === "/health" || req.path.startsWith("/assets/"),
+  message: { error: "Rate limited" },
+});
+app.use(globalLimiter);
 
 // Serve frontend build in production
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1073,6 +1087,7 @@ httpServer.listen(PORT, async () => {
   }
 
   await initMonitoring({ release: "polytrack@2.1.0", environment: process.env.NODE_ENV || "production" });
+  await checkClockSkew();
   await sweepStaleOrders();
   alertStartup(PRIVATE_KEY && FUNDER_ADDRESS ? "LIVE" : "SIMULATION", "2.1.0");
   await runScan();
