@@ -506,6 +506,69 @@ export function getWalletTierAt(address, t) {
   return row ? row.tier : null;
 }
 
+/**
+ * Identify "stale ELITE" wallets — currently classified ELITE but whose
+ * positions_history shows negative cumulative PnL over a trailing window.
+ * These are demotion candidates: wallets that earned their tier with older
+ * performance but recently stopped being smart money.
+ *
+ * Uses the most recent position_history.pnl row per (wallet, condition_id)
+ * inside the window as the trailing PnL signal (rows are snapshots of the
+ * wallet's view of each open/closed position at capture time, so "latest
+ * row inside window" ≈ "how that position stood during the window").
+ *
+ * Returns rows sorted worst-first so a caller can surface the top N.
+ */
+export function getWalletDegradationCandidates({
+  windowDays   = 30,
+  minPnLUsd    = 0,         // flag when trailing PnL < this
+} = {}) {
+  const since = Date.now() - windowDays * 24 * 60 * 60 * 1000;
+  return db.prepare(`
+    SELECT
+      w.address,
+      w.tier,
+      w.score,
+      w.last_scored,
+      COALESCE(trailing.pnl, 0) AS trailing_pnl,
+      COALESCE(trailing.snapshots, 0) AS trailing_snapshots
+    FROM wallets w
+    LEFT JOIN (
+      SELECT
+        wallet_address,
+        SUM(latest_pnl) AS pnl,
+        COUNT(*) AS snapshots
+      FROM (
+        SELECT
+          wallet_address,
+          condition_id,
+          pnl AS latest_pnl,
+          ROW_NUMBER() OVER (
+            PARTITION BY wallet_address, condition_id
+            ORDER BY snapshot_at DESC
+          ) AS rn
+        FROM positions_history
+        WHERE snapshot_at >= ?
+      )
+      WHERE rn = 1
+      GROUP BY wallet_address
+    ) trailing ON trailing.wallet_address = w.address
+    WHERE w.tier = 'ELITE'
+      AND w.blacklisted = 0
+      AND COALESCE(trailing.snapshots, 0) > 0
+      AND COALESCE(trailing.pnl, 0) < ?
+    ORDER BY trailing.pnl ASC
+  `).all(since, minPnLUsd).map(r => ({
+    address:          r.address,
+    tier:             r.tier,
+    score:            r.score,
+    lastScored:       r.last_scored,
+    trailingPnl:      Math.round((r.trailing_pnl || 0) * 100) / 100,
+    trailingSnapshots: r.trailing_snapshots,
+    windowDays,
+  }));
+}
+
 export function getAllWallets() {
   return db.prepare("SELECT * FROM wallets WHERE blacklisted = 0 ORDER BY score DESC").all();
 }

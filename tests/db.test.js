@@ -12,7 +12,7 @@ import {
   resolveSignal, getSignalAccuracy,
   insertMarketSnapshot, insertPositionSnapshot, getDataCaptureStats,
   insertWalletTier, getWalletTierAt,
-  getTradesPnlByStrategy,
+  getTradesPnlByStrategy, getWalletDegradationCandidates,
 } from "../src/db.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -340,6 +340,100 @@ describe("getTradesPnlByStrategy (F2)", () => {
     const manual = rows.find(r => r.strategy === "manual");
     assert.ok(manual, "expected a 'manual' bucket");
     assert.equal(manual.tradeCount, 1);
+  });
+});
+
+// ── Wallet Degradation Detection ────────────────────────────────────────────
+
+describe("getWalletDegradationCandidates", () => {
+  const GOOD   = "0xgoodelite0000000000000000000000000000000";
+  const STALE  = "0xstaleelite000000000000000000000000000000";
+  const PROWAL = "0xpro00000000000000000000000000000000000000";
+
+  it("flags ELITE wallets with negative trailing PnL, ignores profitable ones", () => {
+    const db = getDB();
+    db.exec("DELETE FROM wallets; DELETE FROM positions_history;");
+
+    // Seed 3 wallets at different tiers
+    upsertWallet({
+      addr: GOOD, score: 80, tier: "ELITE", winRate: 70, roi: 30,
+      sharpe: 2, maxDrawdown: 10, timing: 80, consistency: 75,
+      totalPnL: 10000, volume: 50000, closedPositions: 30, openPositions: 2, trades: 50,
+    });
+    upsertWallet({
+      addr: STALE, score: 72, tier: "ELITE", winRate: 55, roi: 25,
+      sharpe: 1.5, maxDrawdown: 15, timing: 75, consistency: 60,
+      totalPnL: 8000, volume: 40000, closedPositions: 25, openPositions: 3, trades: 45,
+    });
+    upsertWallet({
+      addr: PROWAL, score: 55, tier: "PRO", winRate: 52, roi: 15,
+      sharpe: 1, maxDrawdown: 20, timing: 60, consistency: 50,
+      totalPnL: -500, volume: 10000, closedPositions: 15, openPositions: 1, trades: 20,
+    });
+
+    const now = Date.now();
+    const within = now - 10 * 24 * 3600_000; // 10d ago, inside 30d window
+    const outside = now - 60 * 24 * 3600_000; // 60d ago, outside window
+
+    // GOOD: +$500 trailing inside window
+    insertPositionSnapshot({
+      walletAddress: GOOD, conditionId: "c1", outcome: "YES", size: 1000,
+      avgPrice: 0.4, currentValue: 500, pnl: 500, snapshotAt: within,
+    });
+    // STALE: −$1200 trailing inside window
+    insertPositionSnapshot({
+      walletAddress: STALE, conditionId: "c2", outcome: "YES", size: 1000,
+      avgPrice: 0.6, currentValue: 400, pnl: -1200, snapshotAt: within,
+    });
+    // STALE also had a PROFITABLE position 60d ago — must NOT rescue their status
+    insertPositionSnapshot({
+      walletAddress: STALE, conditionId: "c3", outcome: "YES", size: 500,
+      avgPrice: 0.3, currentValue: 450, pnl: 300, snapshotAt: outside,
+    });
+    // PRO wallet is losing but should be ignored (not ELITE)
+    insertPositionSnapshot({
+      walletAddress: PROWAL, conditionId: "c4", outcome: "YES", size: 100,
+      avgPrice: 0.5, currentValue: 30, pnl: -70, snapshotAt: within,
+    });
+
+    const result = getWalletDegradationCandidates({ windowDays: 30 });
+
+    assert.equal(result.length, 1, "exactly one degraded ELITE wallet");
+    assert.equal(result[0].address,     STALE);
+    assert.equal(result[0].tier,        "ELITE");
+    assert.equal(result[0].trailingPnl, -1200);
+    assert.equal(result[0].windowDays,  30);
+  });
+
+  it("picks the latest snapshot per (wallet, market) inside the window", () => {
+    const db = getDB();
+    db.prepare("DELETE FROM positions_history WHERE wallet_address = ?").run(STALE);
+
+    const now = Date.now();
+    const older = now - 20 * 24 * 3600_000;
+    const newer = now - 5  * 24 * 3600_000;
+
+    // Same market c2 observed twice in window — expect the NEWER pnl to count
+    insertPositionSnapshot({
+      walletAddress: STALE, conditionId: "c2", outcome: "YES", size: 1000,
+      avgPrice: 0.5, currentValue: 600, pnl: 100, snapshotAt: older,   // old: +100
+    });
+    insertPositionSnapshot({
+      walletAddress: STALE, conditionId: "c2", outcome: "YES", size: 1000,
+      avgPrice: 0.5, currentValue: 300, pnl: -200, snapshotAt: newer,  // new: −200
+    });
+
+    const result = getWalletDegradationCandidates({ windowDays: 30 });
+    const stale = result.find(r => r.address === STALE);
+    assert.ok(stale, "STALE wallet should appear");
+    assert.equal(stale.trailingPnl, -200, "must use latest snapshot, not sum or avg");
+  });
+
+  it("returns empty array when positions_history is empty", () => {
+    const db = getDB();
+    db.exec("DELETE FROM positions_history;");
+    const result = getWalletDegradationCandidates({ windowDays: 30 });
+    assert.equal(result.length, 0);
   });
 });
 
