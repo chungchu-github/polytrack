@@ -52,7 +52,7 @@ import { HistoryReader } from "./backtest/history.js";
 import { runBacktest } from "./backtest/engine.js";
 import {
   insertBacktest, completeBacktest, getBacktest, listBacktests, deleteBacktest,
-  getTradesPnlByStrategy,
+  getTradesPnlByStrategy, getWalletDegradationCandidates,
 } from "./db.js";
 
 dotenv.config();
@@ -462,6 +462,11 @@ app.get("/health", (_, res) => {
     dataCapture.lastCaptureResult = state.lastCaptureResult || null;
   } catch (e) { dataCapture = { error: e.message }; }
 
+  let degradationCandidates = [];
+  try {
+    degradationCandidates = getWalletDegradationCandidates({ windowDays: 30 });
+  } catch (e) { /* keep /health responsive even if query fails */ }
+
   res.json({
     ok: true,
     version: "2.1.0",
@@ -481,6 +486,7 @@ app.get("/health", (_, res) => {
     tradeFailureStreak,
     db: dbStats,
     dataCapture,
+    degradationCandidates,
   });
 });
 
