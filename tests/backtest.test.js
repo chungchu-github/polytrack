@@ -14,6 +14,7 @@ import {
   initDB, closeDB, getDB,
   insertMarketSnapshot, insertPositionSnapshot,
   insertBacktest, completeBacktest, getBacktest,
+  insertWalletTier,
 } from "../src/db.js";
 import { SimulatedPortfolio, simulateFill } from "../src/backtest/simulate.js";
 import { HistoryReader } from "../src/backtest/history.js";
@@ -185,5 +186,50 @@ describe("HistoryReader", () => {
     const markets = h.getMarketsAt(0, 2000);
     assert.equal(markets.length, 1);
     assert.equal(markets[0].markets[0].tokens.length, 2);
+  });
+
+  // N1 — survivorship fix. Confirm getWalletsAt hands back the tier observed
+  // at time t, not a hardcoded "ELITE". This is the seam that keeps backtest
+  // strategy filters (e.g. consensus only-ELITE) honest against history.
+  it("getWalletsAt reflects the wallet's tier at time t", () => {
+    const db = getDB();
+    db.exec("DELETE FROM positions_history; DELETE FROM wallet_tier_history;");
+
+    const addr = "0xtiertime00000000000000000000000000000000";
+    const T_BASIC = 1000;
+    const T_ELITE = 5000;
+
+    // Wallet had a position observed at each moment
+    insertPositionSnapshot({
+      walletAddress: addr, conditionId: "c1", outcome: "YES", size: 100,
+      avgPrice: 0.4, currentValue: 40, pnl: 0, snapshotAt: T_BASIC,
+    });
+    insertPositionSnapshot({
+      walletAddress: addr, conditionId: "c1", outcome: "YES", size: 100,
+      avgPrice: 0.4, currentValue: 60, pnl: 20, snapshotAt: T_ELITE,
+    });
+    insertWalletTier({ address: addr, tier: "BASIC", score: 20, scoredAt: T_BASIC });
+    insertWalletTier({ address: addr, tier: "ELITE", score: 80, scoredAt: T_ELITE });
+
+    const h = new HistoryReader();
+    const beforePromotion = h.getWalletsAt([addr], T_BASIC + 100, 24 * 3600_000);
+    const afterPromotion  = h.getWalletsAt([addr], T_ELITE + 100, 24 * 3600_000);
+
+    assert.equal(beforePromotion[0]?.tier, "BASIC", "pre-promotion t must see BASIC");
+    assert.equal(afterPromotion[0]?.tier,  "ELITE", "post-promotion t must see ELITE");
+  });
+
+  it("getWalletsAt falls back to ELITE when no tier history exists", () => {
+    const db = getDB();
+    db.exec("DELETE FROM positions_history; DELETE FROM wallet_tier_history;");
+
+    const addr = "0xnotierhist0000000000000000000000000000000";
+    insertPositionSnapshot({
+      walletAddress: addr, conditionId: "c2", outcome: "YES", size: 50,
+      avgPrice: 0.5, currentValue: 25, pnl: 0, snapshotAt: 1000,
+    });
+    const h = new HistoryReader();
+    const out = h.getWalletsAt([addr], 2000, 24 * 3600_000);
+    assert.equal(out[0]?.tier, "ELITE", "fallback preserves pre-V7 behaviour");
   });
 });

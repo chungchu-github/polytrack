@@ -2,7 +2,7 @@
  * HistoryReader — thin accessor over F0.5 snapshot tables for the backtest
  * engine. Pure DB reads; no network, no side effects.
  */
-import { getDB, getMarketSnapshots, getPositionHistory } from "../db.js";
+import { getDB, getMarketSnapshots, getPositionHistory, getWalletTierAt } from "../db.js";
 
 export class HistoryReader {
   constructor() { this.db = getDB(); }
@@ -43,8 +43,12 @@ export class HistoryReader {
   /**
    * Reconstruct wallet-shaped objects at time t from positions_history.
    * Used by ConsensusStrategy which expects `wallets[*].positions`.
-   * Tier is assumed ELITE for any wallet with snapshot rows (backtest
-   * survivorship mitigation is responsibility of the caller).
+   *
+   * Tier is looked up from wallet_tier_history (N1 survivorship fix) so the
+   * backtest only counts a wallet as ELITE if it was ELITE at time t. When no
+   * history exists (e.g. pre-V7 data that pre-dates the tier log), we fall
+   * back to "ELITE" to match the previous hardcoded behaviour — callers who
+   * want the stricter default should filter upstream.
    */
   getWalletsAt(walletAddresses, t, windowMs = 60 * 60 * 1000) {
     const since = t - windowMs;
@@ -71,8 +75,9 @@ export class HistoryReader {
           currentValue: r.current_value,
         });
       }
+      const tier = getWalletTierAt(addr, t) ?? "ELITE";
       out.push({
-        addr, tier: "ELITE", score: 80,
+        addr, tier, score: 80,
         winRate: 0, roi: 0, totalPnL: 0,
         positions,
         recentTrades: [],
