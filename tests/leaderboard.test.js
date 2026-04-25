@@ -160,3 +160,70 @@ describe("filterCandidates (import-leaderboard)", () => {
     assert.equal(out[1].volume, 2_000_000);
   });
 });
+
+// ── PR B — leaderboard-poller pure helpers ──────────────────────────────────
+
+import { mergeRows, dedupeAgainstKnown } from "../src/leaderboard-poller.js";
+
+describe("mergeRows", () => {
+  function row({ addr, pnl, volume, name = "x", rank = 1 }) {
+    return { rank, proxyWallet: addr, pnl, volume, pseudonym: name };
+  }
+
+  it("keeps the highest-ROI observation when a wallet appears in multiple windows", () => {
+    const A = "0x" + "a".repeat(40);
+    const merged = mergeRows({
+      alltime: [row({ addr: A, pnl: 1_000_000, volume: 100_000_000 })],   // 1% ROI
+      monthly: [row({ addr: A, pnl: 200_000,   volume: 5_000_000 })],     // 4% ROI ← winner
+      weekly:  [row({ addr: A, pnl: 50_000,    volume: 5_000_000 })],     // 1% ROI
+    });
+    assert.equal(merged.length, 1);
+    assert.equal(merged[0].window, "monthly");
+    assert.ok(Math.abs(merged[0].roi - 0.04) < 1e-9);
+  });
+
+  it("dedups but keeps distinct wallets", () => {
+    const A = "0x" + "a".repeat(40);
+    const B = "0x" + "b".repeat(40);
+    const merged = mergeRows({
+      alltime: [row({ addr: A, pnl: 100_000, volume: 1_000_000 })],
+      monthly: [row({ addr: B, pnl: 200_000, volume: 1_000_000 })],
+    });
+    assert.equal(merged.length, 2);
+  });
+
+  it("treats zero-volume rows as 0 ROI without throwing", () => {
+    const merged = mergeRows({
+      alltime: [row({ addr: "0x" + "c".repeat(40), pnl: 1, volume: 0 })],
+    });
+    assert.equal(merged.length, 1);
+    assert.equal(merged[0].roi, 0);
+  });
+
+  it("returns [] for empty input", () => {
+    assert.deepEqual(mergeRows({}), []);
+  });
+});
+
+describe("dedupeAgainstKnown", () => {
+  it("filters out addresses that exist in the excluded set", () => {
+    const A = "0x" + "a".repeat(40);
+    const B = "0x" + "b".repeat(40);
+    const C = "0x" + "c".repeat(40);
+    const out = dedupeAgainstKnown(
+      [
+        { proxyWallet: A, pnl: 1, volume: 1, roi: 1 },
+        { proxyWallet: B, pnl: 1, volume: 1, roi: 1 },
+        { proxyWallet: C, pnl: 1, volume: 1, roi: 1 },
+      ],
+      new Set([A, C]),
+    );
+    assert.equal(out.length, 1);
+    assert.equal(out[0].proxyWallet, B);
+  });
+
+  it("returns the input unchanged when the excluded set is empty", () => {
+    const rows = [{ proxyWallet: "0x" + "a".repeat(40) }];
+    assert.deepEqual(dedupeAgainstKnown(rows, new Set()), rows);
+  });
+});

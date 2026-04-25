@@ -39,6 +39,17 @@ const DEFAULTS = {
     maxHoldDays: 14,
     stopLossPct: 0.30,
   },
+  // PR B — periodic leaderboard auto-import. Disabled by default; operator
+  // opts in via Settings UI. Conservative thresholds so a single run can't
+  // flood the watch list with marginal candidates.
+  autoImport: {
+    enabled:       false,
+    intervalHours: 168,             // weekly
+    minPnl:        100_000,         // $100k absolute
+    minRoi:        0.025,           // 2.5%
+    maxAddPerRun:  5,
+    windows:       ["alltime", "monthly", "weekly"],
+  },
 };
 
 const ALLOWED_KEYS = new Set(Object.keys(DEFAULTS));
@@ -73,6 +84,10 @@ export function saveConfig(patch) {
       next.exitPolicy = mergeExitPolicy(current.exitPolicy || DEFAULTS.exitPolicy, v);
       continue;
     }
+    if (k === "autoImport" && v && typeof v === "object") {
+      next.autoImport = mergeAutoImport(current.autoImport || DEFAULTS.autoImport, v);
+      continue;
+    }
     if (typeof DEFAULTS[k] === "number") {
       const n = Number(v);
       if (!Number.isFinite(n) || n < 0) continue;
@@ -85,6 +100,25 @@ export function saveConfig(patch) {
   writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2));
   cache = next;
   return next;
+}
+
+function mergeAutoImport(existing, patch) {
+  const base = existing || DEFAULTS.autoImport;
+  const out = { ...base };
+  if (typeof patch.enabled === "boolean") out.enabled = patch.enabled;
+  for (const numKey of ["intervalHours", "minPnl", "minRoi", "maxAddPerRun"]) {
+    if (Number.isFinite(Number(patch[numKey])) && Number(patch[numKey]) >= 0) {
+      out[numKey] = Number(patch[numKey]);
+    }
+  }
+  if (Array.isArray(patch.windows)) {
+    const allowed = new Set(["alltime", "monthly", "weekly", "daily"]);
+    out.windows = patch.windows
+      .map(w => String(w))
+      .filter(w => allowed.has(w));
+    if (out.windows.length === 0) out.windows = base.windows;
+  }
+  return out;
 }
 
 function mergeExitPolicy(existing, patch) {

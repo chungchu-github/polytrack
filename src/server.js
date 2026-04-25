@@ -63,6 +63,7 @@ import {
   hashPassword, verifyPassword, signJwt, verifyJwt, getJwtSecret,
   generateInviteToken, inviteExpiry,
 } from "./auth.js";
+import { pollAndImport } from "./leaderboard-poller.js";
 import { ethers } from "ethers";
 
 dotenv.config();
@@ -620,6 +621,10 @@ app.get("/health", (_, res) => {
     db: dbStats,
     dataCapture,
     degradationCandidates,
+    autoImport: {
+      lastRunAt: state.lastAutoImportAt || null,
+      lastResult: state.lastAutoImportResult || null,
+    },
   });
 });
 
@@ -1289,6 +1294,65 @@ async function runExits() {
     }
   }
 }
+
+// ── Auto-Import via Cron (PR B) ───────────────────────────────────────────────
+// Periodically pulls Polymarket leaderboard windows and adds the top unseen
+// wallets to the watch list. Disabled by default; opt-in via Settings UI.
+//
+// State is kept in-memory (lastAutoImportAt) — survives a process restart
+// only via the next cron tick deciding it's overdue. Acceptable: nothing
+// breaks if we double-run, the dedup happens against state.wallets.
+async function runAutoImport({ manual = false } = {}) {
+  const cfg = loadConfig();
+  const ai = cfg.autoImport;
+  if (!ai || (!manual && !ai.enabled)) {
+    return { skipped: true, reason: ai?.enabled ? "ok" : "disabled" };
+  }
+
+  // Light cron-side throttle: a manual /import/run always proceeds.
+  if (!manual) {
+    const last = state.lastAutoImportAt || 0;
+    const intervalMs = (ai.intervalHours || 168) * 3600_000;
+    if (Date.now() - last < intervalMs) return { skipped: true, reason: "throttled" };
+  }
+
+  log.info(`Auto-import: starting (windows=${ai.windows.join(",")}, minPnl=${ai.minPnl}, minRoi=${ai.minRoi})…`);
+  const result = await pollAndImport(state, {
+    windows:       ai.windows,
+    minPnl:        ai.minPnl,
+    minRoi:        ai.minRoi,
+    maxAddPerRun:  ai.maxAddPerRun,
+    loadWallet,
+    setWallet,
+    log,
+  });
+  state.lastAutoImportAt = Date.now();
+  state.lastAutoImportResult = result;
+
+  if (result.added.length > 0) {
+    log.info(`Auto-import: added ${result.added.length} wallet(s); skipped ${result.skipped}`);
+    emit("wallets:imported", { added: result.added });
+  } else {
+    log.info(`Auto-import: nothing new to add (scanned ${result.scanned}, skipped ${result.skipped}, failed ${result.failed.length})`);
+  }
+  return result;
+}
+
+// Hourly check — only does real work when intervalHours has elapsed.
+cron.schedule("0 * * * *", () => {
+  runAutoImport({ manual: false }).catch(e => log.warn(`Auto-import cron error: ${e.message}`));
+});
+
+// Manual trigger — admin can hit this from the UI's "Run now" button.
+app.post("/import/run", requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    const result = await runAutoImport({ manual: true });
+    res.json(result);
+  } catch (e) {
+    log.warn(`Manual auto-import failed: ${e.message}`);
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // ── Scheduled Scan ───────────────────────────────────────────────────────────
 cron.schedule(`*/${SCAN_INTERVAL} * * * * *`, () => {
