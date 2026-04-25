@@ -192,6 +192,54 @@ export function normaliseMarket(m = {}) {
  * shape so downstream consumers don't know Gamma changed.
  */
 /**
+ * Recently-active conditionIds discovered from the platform-wide /trades
+ * feed. This is the THIRD market-discovery source and the only one that
+ * surfaces markets with currently-active orderbooks — verified live: trades
+ * happen every 2-30s on Polymarket, and any cid in the recent-trades feed
+ * has by definition just had orderbook activity, so capturing its book
+ * within seconds returns real (non-sentinel) bids/asks.
+ *
+ * Unlike the volume_24hr sweep (post-resolution noise) and the tracked-
+ * wallet positions (ELITE entered hours/days ago, market now stale),
+ * this source IS where buyable books exist right now.
+ *
+ * Returns up to `cap` unique cids, ordered most-recent-first. We pull
+ * `limit` raw trades and dedup — Polymarket's /trades caps at ~500 per
+ * request and many trades cluster on a few hot markets, so 500 raw
+ * trades typically yields 50-150 unique cids.
+ */
+/**
+ * Pure helper — sort trades newest-first, dedup conditionIds, cap.
+ * Exported for unit testing without the network call.
+ */
+export function extractRecentlyActiveCids(trades, cap = 150) {
+  if (!Array.isArray(trades)) return [];
+  const sorted = [...trades].sort(
+    (a, b) => Number(b?.timestamp || 0) - Number(a?.timestamp || 0)
+  );
+  const seen = new Set();
+  const out = [];
+  for (const t of sorted) {
+    const cid = t?.conditionId;
+    if (!cid || seen.has(cid)) continue;
+    seen.add(cid);
+    out.push(cid);
+    if (out.length >= cap) break;
+  }
+  return out;
+}
+
+export async function fetchRecentlyActiveCids({ limit = 500, cap = 150 } = {}) {
+  let trades;
+  try {
+    trades = await apiFetch(`${DATA_API}/trades?limit=${limit}`);
+  } catch {
+    return [];
+  }
+  return extractRecentlyActiveCids(trades, cap);
+}
+
+/**
  * Fetch raw market metadata for a list of conditionIds. Used by the scan
  * loop to discover markets that tracked wallets are positioned in (which
  * is what consensus actually trades on), separate from the broad

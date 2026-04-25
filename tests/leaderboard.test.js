@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { extractBuildId, parseLeaderboardJson } from "../src/polymarket-api.js";
+import { extractBuildId, parseLeaderboardJson, extractRecentlyActiveCids } from "../src/polymarket-api.js";
 import { filterCandidates } from "../scripts/import-leaderboard.js";
 
 describe("extractBuildId", () => {
@@ -352,5 +352,54 @@ describe("walletPassesFilter (post-load PnL gate)", () => {
     assert.equal(walletPassesFilter(null,      policy).pass, false);
     assert.equal(walletPassesFilter(undefined, policy).pass, false);
     assert.equal(walletPassesFilter({},        policy).pass, false);
+  });
+});
+
+// ── extractRecentlyActiveCids (PR active-market discovery) ──────────────────
+
+describe("extractRecentlyActiveCids", () => {
+  it("dedups cids and sorts newest-first", () => {
+    const trades = [
+      { conditionId: "A", timestamp: 100 },
+      { conditionId: "B", timestamp: 200 },
+      { conditionId: "A", timestamp: 150 },     // older A — drop
+      { conditionId: "C", timestamp: 300 },
+    ];
+    // Newest first: C(300), B(200), A(150 dup of A@100)
+    // After dedup: C, B, A
+    assert.deepEqual(extractRecentlyActiveCids(trades), ["C", "B", "A"]);
+  });
+
+  it("respects cap, keeping the most recent N", () => {
+    const trades = [
+      { conditionId: "A", timestamp: 100 },
+      { conditionId: "B", timestamp: 200 },
+      { conditionId: "C", timestamp: 300 },
+      { conditionId: "D", timestamp: 400 },
+    ];
+    assert.deepEqual(extractRecentlyActiveCids(trades, 2), ["D", "C"]);
+  });
+
+  it("ignores trades without conditionId", () => {
+    const trades = [
+      { conditionId: "A", timestamp: 100 },
+      { timestamp: 200 },
+      { conditionId: null, timestamp: 300 },
+    ];
+    assert.deepEqual(extractRecentlyActiveCids(trades), ["A"]);
+  });
+
+  it("handles malformed input safely", () => {
+    assert.deepEqual(extractRecentlyActiveCids(null), []);
+    assert.deepEqual(extractRecentlyActiveCids([]), []);
+    assert.deepEqual(extractRecentlyActiveCids("not an array"), []);
+  });
+
+  it("handles missing timestamps as oldest", () => {
+    const trades = [
+      { conditionId: "A" },                       // no timestamp
+      { conditionId: "B", timestamp: 100 },
+    ];
+    assert.deepEqual(extractRecentlyActiveCids(trades), ["B", "A"]);
   });
 });

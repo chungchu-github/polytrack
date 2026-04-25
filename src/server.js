@@ -19,7 +19,8 @@ import rateLimit from "express-rate-limit";
 import pinoHttp from "pino-http";
 
 import {
-  fetchMarkets, fetchMarketsByConditionIds, fetchWalletTrades, fetchWalletPositions,
+  fetchMarkets, fetchMarketsByConditionIds, fetchRecentlyActiveCids,
+  fetchWalletTrades, fetchWalletPositions,
   fetchLeaderboard, proxyFetch, cancelOrder, fetchMidPrice, fetchOrderBook,
   submitOrder, fetchOrderStatus, CLOB_WS,
 } from "./polymarket-api.js";
@@ -384,20 +385,20 @@ async function runScan() {
   emit("scan:start", {});
 
   try {
-    // 1. Two market sources merged before capture+filter:
-    //    a) Top 100 by 24h volume (broad sweep — mostly post-resolution
-    //       sentinel-orderbook events, but cheap to keep around for
-    //       discovery)
-    //    b) Tracked-wallet positions (PRECISE — markets ELITE wallets
-    //       chose, more likely to have tradeable books). Live VPS proved
-    //       (a) alone gives 0 liquid markets; (b) is what consensus
-    //       actually trades on anyway.
-    //    Use last-scan's wallet positions (state.wallets is populated
-    //    from DB hydration / previous scan), so a freshly-tracked wallet
-    //    contributes one scan later — acceptable tradeoff vs reordering
-    //    the loop.
+    // 1. Three market-discovery sources merged before capture+filter:
+    //    a) Top 100 by 24h volume — broad sweep, mostly post-resolution
+    //       sentinel events. Cheap; kept for completeness.
+    //    b) Tracked-wallet positions — markets ELITE wallets chose. Where
+    //       consensus actually trades. ELITE entered at some past time
+    //       though, so by capture-time the orderbook may already be stale.
+    //    c) Recently-traded markets (PR-5) — the platform-wide /trades
+    //       feed. Markets with activity in the last few minutes; their
+    //       orderbooks are the only ones likely to be non-sentinel right
+    //       now, because we're capturing within seconds of a real fill.
+    //    a + b alone gave fetched=215, liquid=0 in production; c is the
+    //    fix for the "everything is sentinel" cliff.
     const trackedCids = collectTrackedConditionIds(state, { cap: 200 });
-    const [fromVolume, fromTracked] = await Promise.all([
+    const [fromVolume, fromTracked, activeCids] = await Promise.all([
       fetchMarkets({ limit: 100 }).catch(e => {
         log.warn(`fetchMarkets (volume sweep) failed: ${e.message}`);
         return [];
@@ -408,13 +409,27 @@ async function runScan() {
             return [];
           })
         : Promise.resolve([]),
+      fetchRecentlyActiveCids({ limit: 500, cap: 150 }).catch(e => {
+        log.warn(`fetchRecentlyActiveCids failed: ${e.message}`);
+        return [];
+      }),
     ]);
-    // Dedup by conditionId — the same market can appear in both lists.
-    // Tracked-wallet entry wins (richer / more relevant metadata).
-    const fetched = mergeMarketSourcesByCid(fromTracked, fromVolume);
+    // Resolve recently-active cids → market metadata (parallel batch).
+    const fromActive = activeCids.length > 0
+      ? await fetchMarketsByConditionIds(activeCids).catch(e => {
+          log.warn(`fetchMarketsByConditionIds (active) failed: ${e.message}`);
+          return [];
+        })
+      : [];
+    // Dedup. Priority order: active (freshest books) > tracked (relevant
+    // to consensus) > volume (broad sweep). First-seen wins.
+    const fetched = mergeMarketSourcesByCid(
+      fromActive,
+      mergeMarketSourcesByCid(fromTracked, fromVolume),
+    );
     log.scan(
-      `Markets fetched: ${fromTracked.length} from tracked wallets + ` +
-      `${fromVolume.length} from volume sweep → ${fetched.length} unique; capturing orderbooks…`
+      `Markets fetched: ${fromActive.length} active + ${fromTracked.length} tracked + ` +
+      `${fromVolume.length} by volume → ${fetched.length} unique; capturing orderbooks…`
     );
 
     // 2. Capture snapshots NOW (was step 7) — gives us fresh orderbook data
@@ -443,7 +458,9 @@ async function runScan() {
       ...filtered.stats,
       fromVolumeSource:  fromVolume.length,
       fromTrackedSource: fromTracked.length,
+      fromActiveSource:  fromActive.length,
       trackedCidsConsidered: trackedCids.length,
+      activeCidsConsidered:  activeCids.length,
     };
     log.scan(
       `Markets: ${filtered.stats.fetched} fetched → ${filtered.stats.liquid} liquid → ` +
