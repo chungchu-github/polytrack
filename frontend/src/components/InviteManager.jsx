@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { api } from "../api/client.js";
 import clsx from "clsx";
 
@@ -30,14 +31,21 @@ export default function InviteManager({ role }) {
   const createMut = useMutation({
     mutationFn: api.createInvite,
     onSuccess:  (data) => {
-      setLatestUrl(window.location.origin + data.url);
+      const fullUrl = window.location.origin + data.url;
+      setLatestUrl(fullUrl);
       qc.invalidateQueries({ queryKey: ["invitations"] });
+      toast.success("Invite link created", { description: "Send it to your invitee — expires in 7 days." });
     },
+    onError: (e) => toast.error(e.message || "Failed to create invite"),
   });
 
   const revokeMut = useMutation({
     mutationFn: (token) => api.revokeInvite(token),
-    onSuccess:  () => qc.invalidateQueries({ queryKey: ["invitations"] }),
+    onSuccess:  () => {
+      qc.invalidateQueries({ queryKey: ["invitations"] });
+      toast.success("Invite revoked");
+    },
+    onError: (e) => toast.error(e.message || "Failed to revoke invite"),
   });
 
   if (effectiveRole !== "admin") return null;
@@ -71,7 +79,11 @@ export default function InviteManager({ role }) {
           <p className="text-2xs uppercase tracking-wider text-success">New invite link</p>
           <code className="block text-xs break-all text-surface-200">{latestUrl}</code>
           <button
-            onClick={() => navigator.clipboard?.writeText(latestUrl)}
+            onClick={() => {
+              navigator.clipboard?.writeText(latestUrl)
+                .then(() => toast.success("Copied to clipboard"))
+                .catch(() => toast.error("Could not copy — copy manually."));
+            }}
             className="text-2xs text-success underline underline-offset-2 hover:no-underline"
           >
             Copy to clipboard

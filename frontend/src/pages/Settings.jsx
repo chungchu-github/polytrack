@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { api, setToken } from "../api/client.js";
 import InviteManager from "../components/InviteManager.jsx";
 import clsx from "clsx";
@@ -14,6 +15,7 @@ function SessionCard() {
   function handleLogout() {
     api.logout();              // best-effort, server is stateless
     setToken("");              // wipe localStorage
+    toast.success("Signed out");
     window.dispatchEvent(new CustomEvent("polytrack:auth-required"));
   }
 
@@ -119,16 +121,24 @@ export default function Settings() {
       setCfgSaved(true);
       setTimeout(() => setCfgSaved(false), 2000);
       queryClient.invalidateQueries({ queryKey: ["config"] });
+      toast.success("Config saved");
     },
+    onError: (e) => toast.error(e.message || "Failed to save config"),
   });
 
   const autoMutation = useMutation({
     mutationFn: (enabled) => api.setAuto(enabled),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["health"] }),
+    onSuccess: (_data, enabled) => {
+      queryClient.invalidateQueries({ queryKey: ["health"] });
+      toast.success(`Auto-copy ${enabled ? "enabled" : "disabled"}`);
+    },
+    onError: (e) => toast.error(e.message || "Failed to toggle auto-copy"),
   });
 
   const scanMutation = useMutation({
     mutationFn: () => api.triggerScan(),
+    onSuccess: () => toast.success("Scan triggered"),
+    onError:   (e) => toast.error(e.message || "Scan failed"),
   });
 
   return (

@@ -1,8 +1,11 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import { api } from "../api/client.js";
 import { useSignalNotifications } from "../hooks/useNotifications.js";
 import SignalDetailModal from "../components/SignalDetailModal.jsx";
+import { StatCardSkeleton, ListRowSkeleton } from "../components/LoadingSkeleton.jsx";
+import EmptyState from "../components/EmptyState.jsx";
 import clsx from "clsx";
 
 const STRAT_COLORS = {
@@ -14,9 +17,16 @@ const STRAT_COLORS = {
 
 export default function Dashboard() {
   const { data: health } = useQuery({ queryKey: ["health"], queryFn: api.getHealth, refetchInterval: 10_000 });
-  const { data: wallets = [] } = useQuery({ queryKey: ["wallets"], queryFn: api.getWallets, refetchInterval: 30_000 });
-  const { data: signals = [] } = useQuery({ queryKey: ["signals"], queryFn: api.getSignals, refetchInterval: 60_000 });
-  const { data: trades = [] } = useQuery({ queryKey: ["trades"], queryFn: api.getTrades, refetchInterval: 60_000 });
+  const walletsQ = useQuery({ queryKey: ["wallets"], queryFn: api.getWallets, refetchInterval: 30_000 });
+  const signalsQ = useQuery({ queryKey: ["signals"], queryFn: api.getSignals, refetchInterval: 60_000 });
+  const tradesQ  = useQuery({ queryKey: ["trades"],  queryFn: api.getTrades,  refetchInterval: 60_000 });
+  const wallets = walletsQ.data || [];
+  const signals = signalsQ.data || [];
+  const trades  = tradesQ.data  || [];
+  // Show skeleton only on the very first fetch — refetches keep the last
+  // values visible so the dashboard doesn't flash on every 30s tick.
+  const initialLoading =
+    walletsQ.isLoading || signalsQ.isLoading || tradesQ.isLoading;
 
   // Browser notifications for new signals
   useSignalNotifications(signals);
@@ -36,22 +46,74 @@ export default function Dashboard() {
 
       {/* Stats Grid */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <StatCard label="Tracked Wallets" value={wallets.length} accent="text-surface-50" />
-        <StatCard label="Elite Wallets" value={eliteCount} accent="text-primary" />
-        <StatCard label="Active Signals" value={newSignals.length} accent="text-accent" />
-        <StatCard
-          label="Trades Executed"
-          value={trades.length}
-          accent="text-success"
-        />
+        {initialLoading ? (
+          <>
+            <StatCardSkeleton />
+            <StatCardSkeleton />
+            <StatCardSkeleton />
+            <StatCardSkeleton />
+          </>
+        ) : (
+          <>
+            <StatCard
+              label="Tracked Wallets"
+              value={wallets.length}
+              accent="text-surface-50"
+              hint={wallets.length === 0
+                ? { label: "Add wallets →", href: "/wallets" }
+                : null}
+            />
+            <StatCard
+              label="Elite Wallets"
+              value={eliteCount}
+              accent="text-primary"
+              hint={wallets.length > 0 && eliteCount === 0
+                ? { text: "Need ≥20 closed positions + $500 PnL to qualify" }
+                : null}
+            />
+            <StatCard
+              label="Active Signals"
+              value={newSignals.length}
+              accent="text-accent"
+              hint={eliteCount === 0 && newSignals.length === 0
+                ? { text: "Signals appear when ≥3 ELITE wallets agree" }
+                : null}
+            />
+            <StatCard
+              label="Trades Executed"
+              value={trades.length}
+              accent="text-success"
+              hint={!health?.simulationMode === false && trades.length === 0
+                ? { text: "Simulation mode — no real trades" }
+                : null}
+            />
+          </>
+        )}
       </div>
 
       <div className="grid gap-6 lg:grid-cols-2">
         {/* Active Signals */}
         <div className="card">
           <h2 className="card-header">Active Signals</h2>
-          {newSignals.length === 0 ? (
-            <p className="text-sm text-surface-500">No active signals detected.</p>
+          {signalsQ.isLoading ? (
+            <ListRowSkeleton rows={3} />
+          ) : newSignals.length === 0 ? (
+            <EmptyState
+              icon="◇"
+              title="No active signals"
+              description={
+                wallets.length === 0
+                  ? "Add tracked wallets first — signals come from their consensus."
+                  : eliteCount === 0
+                    ? "Tracked wallets exist, but none qualify as ELITE yet. Wait for scoring to run, or add higher-quality wallets."
+                    : "Watching for ≥3 ELITE wallets to agree on a market."
+              }
+              action={
+                wallets.length === 0
+                  ? { label: "Add wallets →", href: "/wallets" }
+                  : null
+              }
+            />
           ) : (
             <div className="space-y-2">
               {newSignals.slice(0, 6).map((sig, i) => (
@@ -100,8 +162,23 @@ export default function Dashboard() {
         {/* Recent Trades */}
         <div className="card">
           <h2 className="card-header">Recent Trades</h2>
-          {recentTrades.length === 0 ? (
-            <p className="text-sm text-surface-500">No trades executed yet.</p>
+          {tradesQ.isLoading ? (
+            <ListRowSkeleton rows={3} />
+          ) : recentTrades.length === 0 ? (
+            <EmptyState
+              icon="↗"
+              title="No trades yet"
+              description={
+                health?.simulationMode
+                  ? "Simulation mode — set PRIVATE_KEY + FUNDER_ADDRESS in .env to enable real trades."
+                  : "Trades will appear here when auto-copy fires or you place a manual one."
+              }
+              action={
+                !health?.autoEnabled && !health?.simulationMode
+                  ? { label: "Enable auto-copy →", href: "/settings" }
+                  : null
+              }
+            />
           ) : (
             <div className="space-y-2">
               {recentTrades.map((trade, i) => (
@@ -152,11 +229,22 @@ export default function Dashboard() {
   );
 }
 
-function StatCard({ label, value, accent }) {
+function StatCard({ label, value, accent, hint }) {
   return (
     <div className="card flex flex-col">
       <span className="stat-label">{label}</span>
       <span className={clsx("stat-value mt-1", accent)}>{value}</span>
+      {hint && (
+        <div className="mt-2 text-2xs leading-snug">
+          {hint.label && hint.href ? (
+            <Link to={hint.href} className="text-primary hover:underline">
+              {hint.label}
+            </Link>
+          ) : (
+            <span className="text-surface-500">{hint.text}</span>
+          )}
+        </div>
+      )}
     </div>
   );
 }

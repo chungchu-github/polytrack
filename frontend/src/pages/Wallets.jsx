@@ -1,8 +1,11 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
+import { toast } from "sonner";
 import { api } from "../api/client.js";
 import ScoreRing from "../components/ScoreRing.jsx";
+import EmptyState from "../components/EmptyState.jsx";
+import { ListRowSkeleton } from "../components/LoadingSkeleton.jsx";
 import clsx from "clsx";
 
 const SORT_KEYS = [
@@ -29,10 +32,12 @@ export default function Wallets() {
 
   const addMutation = useMutation({
     mutationFn: (addr) => api.addWallet(addr),
-    onSuccess: () => {
+    onSuccess: (_data, addr) => {
       queryClient.invalidateQueries({ queryKey: ["wallets"] });
       setNewAddr("");
+      toast.success(`Wallet added: ${addr.slice(0, 6)}…${addr.slice(-4)}`);
     },
+    onError: (e) => toast.error(e.message || "Failed to add wallet"),
   });
 
   const sorted = [...wallets]
@@ -110,13 +115,22 @@ export default function Wallets() {
 
       {/* Table */}
       {isLoading ? (
-        <div className="space-y-2">
-          {Array.from({ length: 5 }).map((_, i) => (
-            <div key={i} className="h-14 animate-pulse rounded-md bg-surface-800" />
-          ))}
-        </div>
+        <ListRowSkeleton rows={5} />
+      ) : wallets.length === 0 ? (
+        <EmptyState
+          icon="✦"
+          title="No tracked wallets yet"
+          description="Paste a Polymarket wallet address (0x…) above to start tracking. Aim for 20–50 high-quality wallets so consensus signals can fire."
+        />
       ) : sorted.length === 0 ? (
-        <p className="text-sm text-surface-500">No wallets found.</p>
+        <EmptyState
+          icon="◍"
+          title={`No wallets match "${tierFilter}"`}
+          description="Try a different tier filter, or wait for scoring to upgrade more wallets."
+          action={tierFilter !== "ALL"
+            ? { label: "Show all tiers", onClick: () => setTierFilter("ALL") }
+            : null}
+        />
       ) : (
         <div className="overflow-x-auto rounded-lg border border-surface-700">
           <table className="w-full text-sm">
