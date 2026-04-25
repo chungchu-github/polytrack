@@ -36,6 +36,7 @@ export function initDB(dbPath) {
   migrateV7();
   migrateV8();
   migrateV9();
+  migrateV10();
   return db;
 }
 
@@ -298,6 +299,18 @@ function migrateV8() {
     );
     CREATE INDEX IF NOT EXISTS idx_invitations_used ON invitations(used_by, expires_at);
   `);
+}
+
+// ── Schema Migration v10 — persist neg_risk per trade ──────────────────────
+// runExits() needs to know whether a trade was originally placed against the
+// neg-risk exchange or the standard CTF exchange so the exit SELL routes to
+// the correct EIP-712 domain. Without this, exiting a multi-outcome market
+// would sign for the wrong contract and silently fail.
+function migrateV10() {
+  const cols = db.prepare("PRAGMA table_info(trades)").all().map(c => c.name);
+  if (!cols.includes("neg_risk")) {
+    db.exec("ALTER TABLE trades ADD COLUMN neg_risk INTEGER DEFAULT 0");
+  }
 }
 
 // ── Schema Migration v9 — auto-exit / stop-loss bookkeeping (P0 #4) ─────────
@@ -807,8 +820,8 @@ export function insertTrade(trade) {
     INSERT INTO trades (signal_id, condition_id, direction, token_id,
       size_usdc, mid_price, limit_price, order_id, status, error_message,
       tx_hash, wallet_count, strength, title, created_at, filled_at,
-      fill_size, fill_price)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      fill_size, fill_price, neg_risk)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     trade.signalId || null,
     trade.conditionId,
@@ -827,7 +840,8 @@ export function insertTrade(trade) {
     trade.executedAt || Date.now(),
     trade.filledAt || null,
     trade.filledSize  ?? trade.fillSize  ?? null,
-    trade.filledPrice ?? trade.fillPrice ?? null
+    trade.filledPrice ?? trade.fillPrice ?? null,
+    trade.negRisk ? 1 : 0
   );
   return result.lastInsertRowid;
 }
