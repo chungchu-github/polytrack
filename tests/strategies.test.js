@@ -112,12 +112,22 @@ describe("MeanRevStrategy", () => {
 
 // ── Arbitrage ────────────────────────────────────────────────────────────────
 describe("ArbitrageStrategy", () => {
+  // Helpers — every snap must carry a tight ask now or it gets rejected as
+  // "no real liquidity". askFor wraps a bid into a realistic snapshot.
+  const liquid = (token_id, bid, ts) => ({
+    condition_id: "c1",
+    token_id,
+    timestamp: ts,
+    best_bid: bid,
+    best_ask: bid + 0.02,         // 2¢ spread = real orderbook
+  });
+
   it("emits signal when YES bid + NO bid sum < 1 - edge", () => {
     const now = Date.now();
     const history = fakeHistory({
       marketSnaps: { c1: [
-        { condition_id: "c1", token_id: "tokA", timestamp: now - 1000, best_bid: 0.45 },
-        { condition_id: "c1", token_id: "tokB", timestamp: now - 500,  best_bid: 0.50 },
+        liquid("tokA", 0.45, now - 1000),
+        liquid("tokB", 0.50, now - 500),
       ]},
     });
     const strat = new ArbitrageStrategy({ minEdgePct: 1.5 });
@@ -130,12 +140,84 @@ describe("ArbitrageStrategy", () => {
     const now = Date.now();
     const history = fakeHistory({
       marketSnaps: { c1: [
-        { condition_id: "c1", token_id: "tokA", timestamp: now, best_bid: 0.50 },
-        { condition_id: "c1", token_id: "tokB", timestamp: now, best_bid: 0.49 },
+        liquid("tokA", 0.50, now),
+        liquid("tokB", 0.49, now),
       ]},
     });
     const strat = new ArbitrageStrategy({ minEdgePct: 1.5 });
     assert.equal(strat.detect({ markets: mkMarkets("c1", ["tokA", "tokB"]), history, now }).length, 0);
+  });
+
+  // ── Placeholder/sentinel rejection (the bug that produced 45 false-
+  //    positive strength=100 signals on illiquid long-tail markets) ────────
+  it("rejects Polymarket's 0.01/0.99 placeholder (no real orderbook)", () => {
+    const now = Date.now();
+    const history = fakeHistory({
+      marketSnaps: { c1: [
+        // Both sides at sentinel pricing — would naively yield edge ≈ 98%
+        { condition_id: "c1", token_id: "tokA", timestamp: now,
+          best_bid: 0.01, best_ask: 0.99 },
+        { condition_id: "c1", token_id: "tokB", timestamp: now,
+          best_bid: 0.01, best_ask: 0.99 },
+      ]},
+    });
+    const strat = new ArbitrageStrategy({ minEdgePct: 1.5 });
+    assert.equal(strat.detect({ markets: mkMarkets("c1", ["tokA", "tokB"]), history, now }).length, 0);
+  });
+
+  it("rejects when only ONE side is illiquid (other leg untradeable)", () => {
+    const now = Date.now();
+    const history = fakeHistory({
+      marketSnaps: { c1: [
+        liquid("tokA", 0.45, now),                          // real
+        { condition_id: "c1", token_id: "tokB", timestamp: now,
+          best_bid: 0.01, best_ask: 0.99 },                 // sentinel
+      ]},
+    });
+    const strat = new ArbitrageStrategy({ minEdgePct: 1.5 });
+    assert.equal(strat.detect({ markets: mkMarkets("c1", ["tokA", "tokB"]), history, now }).length, 0);
+  });
+
+  it("rejects wide spreads (no real orderbook even if bid > 0.02)", () => {
+    const now = Date.now();
+    const history = fakeHistory({
+      marketSnaps: { c1: [
+        // bid 0.10, ask 0.90 — looks like a price but spread = 0.80,
+        // nothing tradeable in between.
+        { condition_id: "c1", token_id: "tokA", timestamp: now,
+          best_bid: 0.10, best_ask: 0.90 },
+        { condition_id: "c1", token_id: "tokB", timestamp: now,
+          best_bid: 0.10, best_ask: 0.90 },
+      ]},
+    });
+    const strat = new ArbitrageStrategy({ minEdgePct: 1.5 });
+    assert.equal(strat.detect({ markets: mkMarkets("c1", ["tokA", "tokB"]), history, now }).length, 0);
+  });
+
+  it("rejects missing/null ask (incomplete snapshot)", () => {
+    const now = Date.now();
+    const history = fakeHistory({
+      marketSnaps: { c1: [
+        { condition_id: "c1", token_id: "tokA", timestamp: now,
+          best_bid: 0.45, best_ask: null },
+        { condition_id: "c1", token_id: "tokB", timestamp: now,
+          best_bid: 0.50, best_ask: 0.52 },
+      ]},
+    });
+    const strat = new ArbitrageStrategy({ minEdgePct: 1.5 });
+    assert.equal(strat.detect({ markets: mkMarkets("c1", ["tokA", "tokB"]), history, now }).length, 0);
+  });
+
+  it("hasRealLiquidity unit checks", () => {
+    const opts = { minLiquidBid: 0.02, maxSpread: 0.10 };
+    const f = ArbitrageStrategy.hasRealLiquidity;
+    assert.equal(f({ best_bid: 0.45, best_ask: 0.47 }, opts), true);
+    assert.equal(f({ best_bid: 0.01, best_ask: 0.99 }, opts), false);   // sentinel
+    assert.equal(f({ best_bid: 0,    best_ask: 0.50 }, opts), false);   // zero bid
+    assert.equal(f({ best_bid: 0.45, best_ask: 0.99 }, opts), false);   // ask sentinel
+    assert.equal(f({ best_bid: 0.10, best_ask: 0.90 }, opts), false);   // wide spread
+    assert.equal(f({ best_bid: null, best_ask: 0.5  }, opts), false);
+    assert.equal(f(null, opts), false);
   });
 });
 
@@ -158,8 +240,8 @@ describe("StrategyEngine", () => {
     const now = Date.now();
     const history = fakeHistory({
       marketSnaps: { c1: [
-        { condition_id: "c1", token_id: "tokA", timestamp: now, best_bid: 0.40 },
-        { condition_id: "c1", token_id: "tokB", timestamp: now, best_bid: 0.40 },
+        { condition_id: "c1", token_id: "tokA", timestamp: now, best_bid: 0.40, best_ask: 0.42 },
+        { condition_id: "c1", token_id: "tokB", timestamp: now, best_bid: 0.40, best_ask: 0.42 },
       ]},
     });
     const eng = new StrategyEngine({
