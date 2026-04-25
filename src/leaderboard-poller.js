@@ -130,6 +130,27 @@ export function mergeSources(leaderboardRows, activeRows) {
  *   },
  * }}
  */
+/**
+ * Pure helper — does a loaded wallet pass the import filter?
+ *
+ * The pre-filter on leaderboard rows uses Polymarket's leaderboard PnL/volume
+ * (which is period-bounded and from Polymarket's API view). The post-filter
+ * here uses our own scoreWallet output, which is the source of truth for
+ * tier assignment downstream. They can disagree (e.g. a wallet that's hot
+ * this month but cold all-time) — we trust our own scoring.
+ *
+ * Exported for testing.
+ */
+export function walletPassesFilter(wallet, { minPnl, minRoi }) {
+  const pnl = Number(wallet?.totalPnL || 0);
+  const volume = Number(wallet?.volume || 0);
+  if (pnl < minPnl) return { pass: false, reason: `pnl $${pnl.toFixed(0)} < $${minPnl}` };
+  if (volume <= 0)  return { pass: false, reason: "no volume" };
+  const roi = pnl / volume;
+  if (roi < minRoi) return { pass: false, reason: `roi ${(roi * 100).toFixed(2)}% < ${(minRoi * 100).toFixed(1)}%` };
+  return { pass: true, roi };
+}
+
 export async function pollAndImport(state, opts) {
   const {
     windows = ["alltime", "monthly", "weekly"],
@@ -138,6 +159,10 @@ export async function pollAndImport(state, opts) {
     maxAddPerRun = 5,
     activeMarketLimit = 15,
     activeMinTradeUsd = 50,
+    // Cap on how many candidates we'll spend a loadWallet API call on per
+    // run. Each loadWallet = ~2 Polymarket calls, so 50 ≈ 100 API calls in
+    // the worst case where the filter rejects everything.
+    maxEvaluatePerRun = 50,
     loadWallet,
     setWallet,
     log = console,
@@ -161,9 +186,11 @@ export async function pollAndImport(state, opts) {
     }
   }
   const leaderboardMerged = mergeRows(rowsByWindow);
+  // Cheap pre-filter on leaderboard rows (we have their pnl/volume already).
+  // Active-trader rows skip this — we don't know their pnl until loadWallet.
   const leaderboardPassed = filterCandidates(
     leaderboardMerged,
-    { minPnl, minRoi, top: maxAddPerRun * 5 },
+    { minPnl, minRoi, top: maxEvaluatePerRun },
   );
 
   // ── Source 2: active traders walking hottest markets ──────────────────────
@@ -178,26 +205,54 @@ export async function pollAndImport(state, opts) {
     log.warn?.(`pollAndImport: active-trader fetch failed — ${e.message}`);
   }
 
-  // ── Combine, dedupe, cap ─────────────────────────────────────────────────
   const combined = mergeSources(leaderboardPassed, activeRows);
 
   const trackedAddrs    = new Set(Array.from(state.wallets.keys()).map(a => a.toLowerCase()));
   const blacklistAddrs  = new Set(getBlacklistedWallets().map(w => w.address.toLowerCase()));
   const excluded        = new Set([...trackedAddrs, ...blacklistAddrs]);
-  const fresh           = dedupeAgainstKnown(combined, excluded).slice(0, maxAddPerRun);
+  // Don't slice yet — we may need to keep evaluating past the first N.
+  const fresh = dedupeAgainstKnown(combined, excluded);
 
-  // ── Load + persist ───────────────────────────────────────────────────────
-  const added  = [];
-  const failed = [];
-  for (const c of fresh) {
+  // ── Load → real-PnL filter → keep, until we hit maxAddPerRun ──────────────
+  // Sort: leaderboard rows first (already pre-filtered, high signal), then
+  // active-trader rows by visible USD volume. We evaluate up to
+  // maxEvaluatePerRun candidates total to bound API cost.
+  const ordered = fresh.slice().sort((a, b) => {
+    if (a.source === "leaderboard" && b.source !== "leaderboard") return -1;
+    if (b.source === "leaderboard" && a.source !== "leaderboard") return 1;
+    return (b.totalTradedUsd || 0) - (a.totalTradedUsd || 0);
+  });
+
+  const added            = [];
+  const failed           = [];
+  const rejected         = [];   // {addr, reason} — for diagnostics
+  let evaluated          = 0;
+
+  for (const c of ordered) {
+    if (added.length >= maxAddPerRun) break;
+    if (evaluated >= maxEvaluatePerRun) break;
+    evaluated++;
+
+    let wallet;
     try {
-      const w = await loadWallet(c.proxyWallet);
-      setWallet(state, w);
-      added.push(c.proxyWallet);
+      wallet = await loadWallet(c.proxyWallet);
     } catch (e) {
       failed.push(c.proxyWallet);
-      log.warn?.(`pollAndImport: ${c.proxyWallet} failed — ${e.message}`);
+      log.warn?.(`pollAndImport: ${c.proxyWallet} loadWallet failed — ${e.message}`);
+      continue;
     }
+
+    // Post-filter on the loaded wallet's REAL all-time PnL/ROI. This is
+    // what was missing before — active-trader rows were being added
+    // without any PnL check, so loud losers (e.g. -$2.4M) snuck in.
+    const verdict = walletPassesFilter(wallet, { minPnl, minRoi });
+    if (!verdict.pass) {
+      rejected.push({ addr: c.proxyWallet, reason: verdict.reason });
+      continue;
+    }
+
+    setWallet(state, wallet);
+    added.push(c.proxyWallet);
   }
 
   const trackedHits   = combined.filter(c => trackedAddrs.has(c.proxyWallet)).length;
@@ -206,7 +261,9 @@ export async function pollAndImport(state, opts) {
   return {
     added,
     failed,
-    skipped: combined.length - fresh.length,
+    rejected,
+    skipped: fresh.length - evaluated,
+    evaluated,
     sources: {
       leaderboard:  { fetched: leaderboardMerged.length, passedFilter: leaderboardPassed.length },
       activeTrader: { fetched: activeRows.length },

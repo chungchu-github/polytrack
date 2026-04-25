@@ -297,3 +297,60 @@ describe("mergeSources (PR B v2 — leaderboard + active traders)", () => {
       }]);
   });
 });
+
+import { walletPassesFilter } from "../src/leaderboard-poller.js";
+
+describe("walletPassesFilter (post-load PnL gate)", () => {
+  const policy = { minPnl: 10_000, minRoi: 0.10 };
+
+  it("passes when totalPnL ≥ minPnl AND roi ≥ minRoi", () => {
+    const r = walletPassesFilter(
+      { totalPnL: 50_000, volume: 200_000 },  // 25% ROI
+      policy,
+    );
+    assert.equal(r.pass, true);
+    assert.ok(Math.abs(r.roi - 0.25) < 1e-9);
+  });
+
+  it("rejects when totalPnL is below threshold", () => {
+    const r = walletPassesFilter(
+      { totalPnL: 1_000, volume: 1_000 },
+      policy,
+    );
+    assert.equal(r.pass, false);
+    assert.match(r.reason, /pnl/);
+  });
+
+  it("rejects loud losers (negative pnl)", () => {
+    const r = walletPassesFilter(
+      { totalPnL: -2_424_000, volume: 5_000_000 },
+      policy,
+    );
+    assert.equal(r.pass, false);
+    assert.match(r.reason, /pnl/);
+  });
+
+  it("rejects when ROI is below threshold even with positive pnl", () => {
+    const r = walletPassesFilter(
+      { totalPnL: 100_000, volume: 100_000_000 },  // 0.1% ROI — market maker
+      policy,
+    );
+    assert.equal(r.pass, false);
+    assert.match(r.reason, /roi/);
+  });
+
+  it("rejects when volume is zero (avoids divide-by-zero)", () => {
+    const r = walletPassesFilter(
+      { totalPnL: 50_000, volume: 0 },
+      policy,
+    );
+    assert.equal(r.pass, false);
+    assert.match(r.reason, /volume/);
+  });
+
+  it("treats null/undefined wallet as failing", () => {
+    assert.equal(walletPassesFilter(null,      policy).pass, false);
+    assert.equal(walletPassesFilter(undefined, policy).pass, false);
+    assert.equal(walletPassesFilter({},        policy).pass, false);
+  });
+});
