@@ -12,10 +12,20 @@
 const DEFAULTS = {
   recencyDays: 7,         // only count positions with activity in last N days
   minPositionSize: 10,    // minimum USD position size to count
-  minWallets: 3,          // minimum ELITE wallets for signal
+  // V1 accumulation override (audit P0-1): with ELITE count growing slowly,
+  // 3 was unreachable for weeks. 2 is permissive enough to surface signals,
+  // tradeoff is more noise — entry-edge filter below catches stale ones.
+  // Raise back to 3 once eliteCount >= 5 stably.
+  minWallets: 2,
   sizeCapPerWallet: 10000,// cap per-wallet weight at this USD value
   staleAfterScans: 3,     // mark STALE if not confirmed in N scans
   expireAfterScans: 6,    // mark EXPIRED after N scans without confirmation
+  // Entry-edge filter (audit P1-2): if current market price is already
+  // `maxEntryDrift` price units above the ELITE wallets' weighted-average
+  // entry price, skip the signal — ELITE got their edge cheap and we'd be
+  // chasing. Negative drift (we'd enter cheaper than ELITE) is fine.
+  // 0.15 = 15¢ on a 0-1 prediction market scale. Set to null to disable.
+  maxEntryDrift: 0.15,
 };
 
 // ── Signal Store ─────────────────────────────────────────────────────────────
@@ -32,13 +42,25 @@ export class SignalStore {
 
   /**
    * Run signal detection against current wallet and market data.
-   * Returns array of active signals (NEW, CONFIRMED).
+   *
+   * @param {Array} wallets   wallet objects (with .tier, .positions)
+   * @param {Array} markets   fetchMarkets() output
+   * @param {object} [history]  HistoryReader (optional). When supplied,
+   *   the entry-edge filter (maxEntryDrift) compares ELITE's average
+   *   entry price to the latest mid-price snapshot. Without it, the
+   *   filter is silently skipped (preserves legacy behaviour for older
+   *   call sites).
+   * @returns array of active signals (NEW, CONFIRMED).
    */
-  detect(wallets, markets) {
+  detect(wallets, markets, history = null) {
     this.scanCount++;
     const cfg = this.config;
     const now = Date.now();
     const recencyCutoff = now / 1000 - cfg.recencyDays * 86400;
+
+    // Track signals filtered by the entry-edge gate so callers can surface
+    // "we saw a consensus but it was already pumped" diagnostics.
+    this.lastSkippedByEdge = [];
 
     // Only use ELITE wallets
     const elites = wallets.filter(w => w.tier === "ELITE");
@@ -95,9 +117,45 @@ export class SignalStore {
           if (opposing.length > 0 && aligned.length / opposing.length < 2) continue;
 
           const key = `${conditionId}::${dir}`;
+
+          // ── Entry-edge filter (audit P1-2) ──────────────────────────────
+          // Compare ELITE's weighted-avg entry to the current market price.
+          // If price has drifted up by more than maxEntryDrift cents,
+          // skip — we'd be chasing past the smart-money edge.
+          //
+          // Skipped silently when no history reader is supplied (e.g. older
+          // /scan?quick paths) or no recent snapshot exists.
+          const entryAnalysis = analyseEntryEdge({
+            aligned,
+            tokens: m.tokens,
+            direction: dir,
+            history,
+            now,
+            maxDrift: cfg.maxEntryDrift,
+          });
+          if (entryAnalysis.skip) {
+            this.lastSkippedByEdge.push({
+              conditionId,
+              direction: dir,
+              reason: entryAnalysis.reason,
+              eliteAvgEntry: entryAnalysis.eliteAvgEntry,
+              currentPrice: entryAnalysis.currentPrice,
+              entryEdge: entryAnalysis.entryEdge,
+            });
+            continue;
+          }
+
           const strength = calcStrength(aligned, elites, directions);
 
           confirmedKeys.add(key);
+
+          // Snapshot the entry-edge fields so dashboards can show them on
+          // both NEW and refreshed-CONFIRMED signals.
+          const edgeFields = {
+            eliteAvgEntry: entryAnalysis.eliteAvgEntry ?? null,
+            currentPrice:  entryAnalysis.currentPrice  ?? null,
+            entryEdge:     entryAnalysis.entryEdge     ?? null,
+          };
 
           if (this.signals.has(key)) {
             // Update existing signal
@@ -109,6 +167,7 @@ export class SignalStore {
             sig.strength = strength;
             sig.wallets = aligned;
             sig.opposingCount = opposing.length;
+            Object.assign(sig, edgeFields);
             if (sig.status === "NEW" || sig.status === "STALE") {
               sig.status = "CONFIRMED";
             }
@@ -129,6 +188,7 @@ export class SignalStore {
               firstSeenScan: this.scanCount,
               lastConfirmedAt: now,
               lastConfirmedScan: this.scanCount,
+              ...edgeFields,
             });
           }
         }
@@ -231,6 +291,93 @@ function calcStrength(aligned, allElites, directions) {
 
   const raw = countFactor * 0.40 + avgScore * 0.25 + sizeFactor * 0.20 + (100 - opposingPenalty) * 0.15;
   return Math.round(Math.max(0, Math.min(100, raw)));
+}
+
+// ── Entry-edge analysis (audit P1-2) ────────────────────────────────────────
+
+/**
+ * Decide whether a consensus signal should fire based on how far the current
+ * market price has drifted above the ELITE wallets' weighted-average entry.
+ *
+ * Returns:
+ *   { skip: false, eliteAvgEntry, currentPrice, entryEdge }
+ *     — proceed; surface the prices on the signal payload
+ *   { skip: true, reason, ...prices }
+ *     — drop the signal; reason is one of:
+ *         "drift-exceeded"  → currentPrice > entry + maxDrift (chasing)
+ *         "no-history"      → no HistoryReader passed (legacy callers)
+ *         "no-snapshot"     → token had no recent mid-price observation
+ *         "no-entry"        → ELITE positions had no avgPrice (data gap)
+ *
+ * "no-history" / "no-snapshot" / "no-entry" all return skip=false to preserve
+ * legacy behaviour — the filter only ACTIVELY rejects when it has full data.
+ *
+ * Direction-symmetric: works on whichever outcome's price is being signalled.
+ * For YES we want the YES token's price; for NO we want the NO token's.
+ */
+export function analyseEntryEdge({ aligned, tokens, direction, history, now, maxDrift }) {
+  if (!Array.isArray(aligned) || aligned.length === 0) {
+    return { skip: false, reason: "no-aligned" };
+  }
+  // Weighted-average entry across the aligned ELITE wallets.
+  // Weight by capped position value (same weight already on the row).
+  let totalW = 0, weightedSum = 0;
+  for (const a of aligned) {
+    const p = Number(a.avgPrice);
+    if (!Number.isFinite(p) || p <= 0) continue;
+    const w = Number(a.weight) || 0;
+    if (w <= 0) continue;
+    totalW += w;
+    weightedSum += p * w;
+  }
+  if (totalW === 0) {
+    // ELITE positions don't have avgPrice — can't compute drift. Pass through
+    // (legacy behaviour) rather than block on missing data.
+    return { skip: false, reason: "no-entry" };
+  }
+  const eliteAvgEntry = weightedSum / totalW;
+
+  // Current price — needs HistoryReader and a recent snapshot.
+  if (!history || typeof history.getMarketAt !== "function") {
+    return { skip: false, reason: "no-history", eliteAvgEntry };
+  }
+  // Pick the token matching the signalled direction. Token list comes from
+  // normaliseMarket, which puts outcomes in their listed order. We accept
+  // either explicit `outcome` field or fall back to YES=index0 / NO=index1.
+  const targetToken = pickTokenForDirection(tokens, direction);
+  if (!targetToken) {
+    return { skip: false, reason: "no-token", eliteAvgEntry };
+  }
+  const snap = history.getMarketAt(targetToken, now);
+  if (!snap || snap.mid_price == null) {
+    return { skip: false, reason: "no-snapshot", eliteAvgEntry };
+  }
+  const currentPrice = Number(snap.mid_price);
+  const entryEdge = currentPrice - eliteAvgEntry;
+
+  // Drift exceeded → reject. Negative drift (we'd buy cheaper than ELITE)
+  // is always fine — actually a better deal than they got.
+  if (Number.isFinite(maxDrift) && entryEdge > maxDrift) {
+    return {
+      skip: true, reason: "drift-exceeded",
+      eliteAvgEntry, currentPrice, entryEdge,
+    };
+  }
+  return { skip: false, eliteAvgEntry, currentPrice, entryEdge };
+}
+
+function pickTokenForDirection(tokens, direction) {
+  if (!Array.isArray(tokens) || tokens.length === 0) return null;
+  // Prefer explicit outcome match
+  const want = String(direction).toUpperCase();
+  for (const t of tokens) {
+    const out = String(t?.outcome || "").toUpperCase();
+    if (out === want) return t.token_id || t.tokenId || t;
+  }
+  // Fallback: index 0 = YES, index 1 = NO (Polymarket convention)
+  const idx = want === "YES" ? 0 : 1;
+  const t = tokens[idx] || tokens[0];
+  return t?.token_id || t?.tokenId || t;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

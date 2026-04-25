@@ -14,10 +14,13 @@ export class ConsensusStrategy extends BaseStrategy {
       enabled: true,
       recencyDays: 7,
       minPositionSize: 10,
-      minWallets: 3,
+      // V1-accumulation override (PR consensus-entry-edge): 3→2 while
+      // ELITE pool grows. Raise back to 3 once eliteCount >= 5 stably.
+      minWallets: 2,
       sizeCapPerWallet: 10000,
       staleAfterScans: 3,
       expireAfterScans: 6,
+      maxEntryDrift: 0.15,
     };
   }
   get name() { return "consensus"; }
@@ -27,8 +30,8 @@ export class ConsensusStrategy extends BaseStrategy {
     this.store = new SignalStore(this.config);
   }
 
-  detect({ wallets, markets }) {
-    return this.store.detect(wallets, markets);
+  detect({ wallets, markets, history }) {
+    return this.store.detect(wallets, markets, history);
   }
 
   // Expose store methods so StrategyEngine can delegate lifecycle concerns
