@@ -38,7 +38,7 @@ import {
 } from "./alerts.js";
 import {
   createState, hydrateFromDB, getWalletList, getSignals,
-  addTrade, setWallet, beginScan, endScan,
+  addTrade, setWallet, removeWallet, restoreWallet, beginScan, endScan,
 } from "./state.js";
 import {
   initDB, closeDB, getStats as getDBStats, getStalePendingTrades,
@@ -57,6 +57,7 @@ import {
   createUser, getUserByUsername, getUserById, updateUserLastLogin, countUsers,
   createInvitationRow, getInvitation, markInvitationUsed, deleteInvitation,
   listInvitationsByAdmin,
+  getBlacklistedWallets,
 } from "./db.js";
 import {
   hashPassword, verifyPassword, signJwt, verifyJwt, getJwtSecret,
@@ -331,13 +332,20 @@ async function runScan() {
     emit("markets", state.markets);
     log.scan(`Loaded ${state.markets.length} markets`);
 
-    // 2. Build watch list: seed + leaderboard
-    let watchList = [...new Set(SEED_WALLETS)];
+    // 2. Build watch list: seed + currently-tracked + leaderboard, then drop
+    //    anything the operator soft-deleted. Capped at 50 to stay under
+    //    Polymarket's rate limits with comfortable margin.
+    let watchList = [...new Set([
+      ...SEED_WALLETS,
+      ...state.wallets.keys(),  // manually-added wallets keep getting rescored
+    ])];
     try {
       const lbAddrs = await fetchLeaderboard({ time: "weekly", limit: 20 });
-      watchList = [...new Set([...lbAddrs, ...watchList])].slice(0, 25);
-      log.scan(`Watch list: ${watchList.length} wallets`);
-    } catch { log.warn("Leaderboard fetch failed, using seed wallets"); }
+      watchList = [...new Set([...lbAddrs, ...watchList])];
+    } catch { log.warn("Leaderboard fetch failed, using seed + tracked wallets"); }
+    const blacklisted = new Set(getBlacklistedWallets().map(w => w.address));
+    watchList = watchList.filter(a => !blacklisted.has(a)).slice(0, 50);
+    log.scan(`Watch list: ${watchList.length} wallets (${blacklisted.size} blacklisted)`);
 
     // 3. Load each wallet sequentially with rate limiting
     for (const addr of watchList) {
@@ -648,6 +656,37 @@ app.post("/wallets", requireAuth, async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// List soft-deleted wallets (admin's "Trash"). Auth required so a leaked
+// browser doesn't reveal addresses we deliberately stopped tracking.
+app.get("/wallets/blacklisted", requireAuth, (_req, res) => {
+  res.json(getBlacklistedWallets());
+});
+
+// Soft-delete a tracked wallet. Body-less DELETE — id in path. The wallet
+// stops being scanned but the V1 positions_history / wallet_tier_history
+// rows are intentionally retained so backtests can still see its past.
+app.delete("/wallets/:addr", requireAuth, (req, res) => {
+  const addr = (req.params.addr || "").toLowerCase();
+  if (!/^0x[0-9a-f]{40}$/.test(addr)) {
+    return res.status(400).json({ error: "Invalid address" });
+  }
+  const had = removeWallet(state, addr);
+  emit("wallet:removed", { addr });
+  res.json({ ok: true, wasTracked: had });
+});
+
+// Restore a soft-deleted wallet. The next scan tick will rehydrate it
+// into state.wallets and resume API loads.
+app.post("/wallets/:addr/restore", requireAuth, (req, res) => {
+  const addr = (req.params.addr || "").toLowerCase();
+  if (!/^0x[0-9a-f]{40}$/.test(addr)) {
+    return res.status(400).json({ error: "Invalid address" });
+  }
+  const restored = restoreWallet(state, addr);
+  if (!restored) return res.status(404).json({ error: "Wallet not found in trash" });
+  res.json({ ok: true });
 });
 
 // Get markets (public)

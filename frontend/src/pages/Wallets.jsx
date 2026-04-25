@@ -30,6 +30,8 @@ export default function Wallets() {
   const [newAddr, setNewAddr] = useState("");
   const [tierFilter, setTierFilter] = useState("ALL");
 
+  const [showTrash, setShowTrash] = useState(false);
+
   const addMutation = useMutation({
     mutationFn: (addr) => api.addWallet(addr),
     onSuccess: (_data, addr) => {
@@ -39,6 +41,35 @@ export default function Wallets() {
     },
     onError: (e) => toast.error(e.message || "Failed to add wallet"),
   });
+
+  const deleteMutation = useMutation({
+    mutationFn: (addr) => api.deleteWallet(addr),
+    onSuccess: (_data, addr) => {
+      queryClient.invalidateQueries({ queryKey: ["wallets"] });
+      queryClient.invalidateQueries({ queryKey: ["wallets-blacklist"] });
+      toast.success(
+        `Removed ${addr.slice(0, 6)}…${addr.slice(-4)} — restore from Trash if needed`
+      );
+    },
+    onError: (e) => toast.error(e.message || "Failed to remove wallet"),
+  });
+
+  const restoreMutation = useMutation({
+    mutationFn: (addr) => api.restoreWallet(addr),
+    onSuccess: (_data, addr) => {
+      queryClient.invalidateQueries({ queryKey: ["wallets"] });
+      queryClient.invalidateQueries({ queryKey: ["wallets-blacklist"] });
+      toast.success(`Restored ${addr.slice(0, 6)}…${addr.slice(-4)}`);
+    },
+    onError: (e) => toast.error(e.message || "Failed to restore wallet"),
+  });
+
+  function handleDelete(addr) {
+    const short = `${addr.slice(0, 6)}…${addr.slice(-4)}`;
+    if (window.confirm(`Stop tracking ${short}?\n\nIts V1 history is preserved and can be restored from Trash.`)) {
+      deleteMutation.mutate(addr);
+    }
+  }
 
   const sorted = [...wallets]
     .filter(w => tierFilter === "ALL" || w.tier === tierFilter)
@@ -154,6 +185,9 @@ export default function Wallets() {
                     )}
                   </th>
                 ))}
+                <th className="px-3 py-2.5 text-right text-2xs font-semibold uppercase tracking-wider text-surface-400 w-10">
+                  {/* actions */}
+                </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-surface-700/50">
@@ -185,10 +219,101 @@ export default function Wallets() {
                   <td className="px-3 py-2.5 text-right tabular-nums text-surface-300">
                     {w.trades}
                   </td>
+                  <td className="px-3 py-2.5 text-right">
+                    <button
+                      onClick={() => handleDelete(w.addr)}
+                      disabled={deleteMutation.isPending}
+                      title="Stop tracking (soft delete)"
+                      aria-label={`Remove tracking for ${w.addr}`}
+                      className="text-surface-600 hover:text-danger transition-colors p-1 rounded disabled:opacity-30"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M3 6h18M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                      </svg>
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* Trash drawer — admin can review + restore soft-deleted wallets */}
+      <TrashSection
+        open={showTrash}
+        onToggle={() => setShowTrash(v => !v)}
+        onRestore={(addr) => restoreMutation.mutate(addr)}
+        restoring={restoreMutation.isPending}
+      />
+    </div>
+  );
+}
+
+function TrashSection({ open, onToggle, onRestore, restoring }) {
+  const { data: trashed = [], isLoading } = useQuery({
+    queryKey: ["wallets-blacklist"],
+    queryFn:  api.listBlacklisted,
+    enabled:  open,
+    refetchInterval: open ? 30_000 : false,
+  });
+
+  return (
+    <div className="card !py-3">
+      <button
+        onClick={onToggle}
+        className="w-full flex items-center justify-between text-2xs uppercase tracking-wider text-surface-500 hover:text-surface-300 transition-colors"
+      >
+        <span>{open ? "▼" : "▶"} Trash{!open && trashed?.length ? ` (${trashed.length})` : ""}</span>
+        <span className="text-2xs text-surface-600">
+          Soft-deleted wallets — V1 history retained
+        </span>
+      </button>
+      {open && (
+        <div className="mt-3">
+          {isLoading ? (
+            <p className="text-xs text-surface-500">Loading…</p>
+          ) : trashed.length === 0 ? (
+            <p className="text-xs text-surface-500">Trash is empty.</p>
+          ) : (
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-2xs uppercase tracking-wider text-surface-500 text-left">
+                  <th className="py-1.5 pr-2 font-normal">Address</th>
+                  <th className="py-1.5 pr-2 font-normal">Tier</th>
+                  <th className="py-1.5 pr-2 font-normal text-right">Score</th>
+                  <th className="py-1.5 pr-2 font-normal text-right">PnL</th>
+                  <th className="py-1.5 font-normal text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {trashed.map(w => (
+                  <tr key={w.address} className="border-t border-surface-800">
+                    <td className="py-1.5 pr-2 font-mono text-surface-300">
+                      {w.address.slice(0, 6)}…{w.address.slice(-4)}
+                    </td>
+                    <td className="py-1.5 pr-2 text-surface-400">{w.tier}</td>
+                    <td className="py-1.5 pr-2 tabular-nums text-right text-surface-300">{w.score}</td>
+                    <td className={clsx(
+                      "py-1.5 pr-2 tabular-nums text-right",
+                      (w.total_pnl || 0) >= 0 ? "text-success" : "text-danger"
+                    )}>
+                      ${fmt(w.total_pnl)}
+                    </td>
+                    <td className="py-1.5 text-right">
+                      <button
+                        onClick={() => onRestore(w.address)}
+                        disabled={restoring}
+                        className="text-2xs text-primary underline underline-offset-2 hover:no-underline disabled:opacity-50"
+                      >
+                        Restore
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
       )}
     </div>

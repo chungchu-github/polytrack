@@ -691,7 +691,27 @@ export function getWalletByAddress(addr) {
 }
 
 export function blacklistWallet(addr) {
-  db.prepare("UPDATE wallets SET blacklisted = 1 WHERE address = ?").run(addr);
+  return db.prepare("UPDATE wallets SET blacklisted = 1 WHERE address = ?").run(addr).changes;
+}
+
+/** Reverse blacklistWallet — used by the Restore action in the UI Trash. */
+export function unblacklistWallet(addr) {
+  return db.prepare("UPDATE wallets SET blacklisted = 0 WHERE address = ?").run(addr).changes;
+}
+
+/**
+ * Wallets the operator has soft-deleted. Returned with the few fields the
+ * Trash UI cares about (address / tier / score / pnl / when last scored)
+ * — we don't expose the full row so callers can't accidentally treat
+ * blacklisted entries as live.
+ */
+export function getBlacklistedWallets() {
+  return db.prepare(`
+    SELECT address, tier, score, total_pnl, last_scored
+      FROM wallets
+     WHERE blacklisted = 1
+     ORDER BY last_scored DESC
+  `).all();
 }
 
 // ── Signal Queries ───────────────────────────────────────────────────────────
