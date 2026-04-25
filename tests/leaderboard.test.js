@@ -227,3 +227,73 @@ describe("dedupeAgainstKnown", () => {
     assert.deepEqual(dedupeAgainstKnown(rows, new Set()), rows);
   });
 });
+
+import { mergeSources } from "../src/leaderboard-poller.js";
+
+describe("mergeSources (PR B v2 — leaderboard + active traders)", () => {
+  const A = "0x" + "a".repeat(40);
+  const B = "0x" + "b".repeat(40);
+  const C = "0x" + "c".repeat(40);
+
+  it("includes leaderboard rows tagged source='leaderboard'", () => {
+    const out = mergeSources(
+      [{ proxyWallet: A, pnl: 1_000_000, volume: 30_000_000, roi: 0.033, pseudonym: "alpha" }],
+      [],
+    );
+    assert.equal(out.length, 1);
+    assert.equal(out[0].source, "leaderboard");
+    assert.equal(out[0].pnl, 1_000_000);
+    assert.equal(out[0].pseudonym, "alpha");
+  });
+
+  it("includes active-trader rows tagged source='active-trader' with no pnl/roi", () => {
+    const out = mergeSources(
+      [],
+      [{ proxyWallet: B, marketCount: 4, totalTradedUsd: 50_000, lastTradeTs: 12345 }],
+    );
+    assert.equal(out.length, 1);
+    assert.equal(out[0].source,         "active-trader");
+    assert.equal(out[0].pnl,            null);
+    assert.equal(out[0].roi,            null);
+    assert.equal(out[0].marketCount,    4);
+    assert.equal(out[0].totalTradedUsd, 50_000);
+  });
+
+  it("leaderboard wins on duplicates (richer data)", () => {
+    const out = mergeSources(
+      [{ proxyWallet: A, pnl: 1_000_000, roi: 0.05, pseudonym: "alpha" }],
+      [{ proxyWallet: A, marketCount: 3, totalTradedUsd: 999 }],
+    );
+    assert.equal(out.length, 1);
+    assert.equal(out[0].source, "leaderboard");
+    assert.equal(out[0].pnl, 1_000_000);
+    // active-trader-only fields shouldn't bleed in
+    assert.equal(out[0].marketCount, undefined);
+  });
+
+  it("preserves distinct addresses across sources", () => {
+    const out = mergeSources(
+      [{ proxyWallet: A, pnl: 100, volume: 1000, roi: 0.1 }],
+      [{ proxyWallet: B, marketCount: 2, totalTradedUsd: 5000 }],
+    );
+    const addrs = out.map(r => r.proxyWallet).sort();
+    assert.deepEqual(addrs, [A, B].sort());
+  });
+
+  it("handles null/empty inputs", () => {
+    assert.deepEqual(mergeSources(null,  null),  []);
+    assert.deepEqual(mergeSources([],    []),    []);
+    assert.deepEqual(mergeSources(null,  [{ proxyWallet: C, marketCount: 1, totalTradedUsd: 100 }]),
+      [{
+        proxyWallet:    C,
+        pnl:            null,
+        volume:         null,
+        roi:            null,
+        pseudonym:      null,
+        source:         "active-trader",
+        marketCount:    1,
+        totalTradedUsd: 100,
+        lastTradeTs:    undefined,
+      }]);
+  });
+});

@@ -363,6 +363,93 @@ export async function fetchLeaderboard({ time = "alltime", limit = 20 } = {}) {
 }
 
 /**
+ * Fetch recent trades on a specific market. Returns raw row objects with
+ * proxyWallet / size / price / side / timestamp / pseudonym fields.
+ *
+ * Polymarket's `/trades` endpoint caps at ~100 per call. Used by the
+ * active-traders aggregation for per-market discovery.
+ */
+export async function fetchMarketTrades(conditionId, { limit = 100 } = {}) {
+  if (!conditionId) return [];
+  try {
+    const rows = await apiFetch(
+      `${DATA_API}/trades?market=${encodeURIComponent(conditionId)}&limit=${limit}`
+    );
+    return Array.isArray(rows) ? rows : [];
+  } catch (e) {
+    log.warn(`fetchMarketTrades failed for ${conditionId.slice(0, 10)}…: ${e.message}`);
+    return [];
+  }
+}
+
+/**
+ * Discover active traders by walking the top hottest markets and pulling
+ * their recent trades. The Polymarket leaderboard endpoint caps at 20
+ * unique addresses no matter how it's queried; this is the alternative
+ * data source for finding fresh candidates beyond that ceiling.
+ *
+ * Returns an array of:
+ *   { proxyWallet, marketCount, totalTradedUsd, lastTradeTs }
+ * sorted by totalTradedUsd descending. Already-known wallets are NOT
+ * filtered here — that's the caller's job.
+ *
+ * @param {object} opts
+ * @param {number} [opts.marketLimit]    top N markets to walk
+ * @param {number} [opts.perMarketLimit] trades per market
+ * @param {number} [opts.minTradeUsd]    skip individual trades below this
+ *                                       threshold (filters out dust)
+ */
+export async function fetchActiveTraders({
+  marketLimit    = 15,
+  perMarketLimit = 100,
+  minTradeUsd    = 50,
+} = {}) {
+  // 1. Hottest markets by 24h volume — same source the scan loop uses.
+  let events;
+  try {
+    events = await apiFetch(
+      `${GAMMA_API}/events?active=true&closed=false&order=volume_24hr&ascending=false&limit=${marketLimit}`
+    );
+  } catch (e) {
+    log.warn(`fetchActiveTraders: events fetch failed — ${e.message}`);
+    return [];
+  }
+
+  const cids = (Array.isArray(events) ? events : [])
+    .flatMap(e => Array.isArray(e?.markets) ? e.markets.map(m => m.conditionId) : [])
+    .filter(Boolean);
+
+  // 2. Aggregate trades across markets. Each address accumulates total
+  //    visible USD volume + a counter of distinct markets touched + the
+  //    most recent trade timestamp.
+  const agg = new Map();
+  for (const cid of cids) {
+    const trades = await fetchMarketTrades(cid, { limit: perMarketLimit });
+    for (const t of trades) {
+      const addr = (t.proxyWallet || "").toLowerCase();
+      if (!/^0x[0-9a-f]{40}$/.test(addr)) continue;
+      const sizeUsd = Number(t.size || 0) * Number(t.price || 0);
+      if (!(sizeUsd >= minTradeUsd)) continue;
+      const ts = Number(t.timestamp || 0) * 1000;  // API returns seconds
+      const a = agg.get(addr) || { proxyWallet: addr, marketCount: 0, markets: new Set(), totalTradedUsd: 0, lastTradeTs: 0 };
+      if (!a.markets.has(cid)) { a.markets.add(cid); a.marketCount++; }
+      a.totalTradedUsd += sizeUsd;
+      if (ts > a.lastTradeTs) a.lastTradeTs = ts;
+      agg.set(addr, a);
+    }
+  }
+
+  return [...agg.values()]
+    .map(a => ({
+      proxyWallet:    a.proxyWallet,
+      marketCount:    a.marketCount,
+      totalTradedUsd: Math.round(a.totalTradedUsd),
+      lastTradeTs:    a.lastTradeTs,
+    }))
+    .sort((a, b) => b.totalTradedUsd - a.totalTradedUsd);
+}
+
+/**
  * Fetch mid-price for a token.
  * Returns null on failure (price is checked before use).
  */
