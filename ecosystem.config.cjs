@@ -29,10 +29,12 @@ module.exports = {
       exponential_backoff_restart_delay: 2000,
       kill_timeout: 10000,       // give SIGINT 10s to flush DB and close sockets
       wait_ready: false,
+      // PM2 env block is intentionally minimal. PORT, HOST, API_TOKEN, and
+      // every other secret-or-deploy-specific value live in `.env` so a fresh
+      // clone + cp .env.example .env "just works" — without PM2 silently
+      // shadowing what dotenv loaded.
       env: {
         NODE_ENV: "production",
-        PORT: 3000,
-        HOST: "0.0.0.0",
       },
       env_development: {
         NODE_ENV: "development",

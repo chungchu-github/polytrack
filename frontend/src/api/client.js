@@ -1,11 +1,30 @@
 const BASE = "";
+const TOKEN_KEY = "polytrack_token";
+const AUTH_EVENT = "polytrack:auth-required";
 
-function getToken() {
-  return localStorage.getItem("polytrack_token") || "";
+export function getToken() {
+  return localStorage.getItem(TOKEN_KEY) || "";
 }
 
 export function setToken(token) {
-  localStorage.setItem("polytrack_token", token);
+  if (token) localStorage.setItem(TOKEN_KEY, token);
+  else       localStorage.removeItem(TOKEN_KEY);
+}
+
+export function hasToken() {
+  return !!getToken();
+}
+
+/**
+ * Custom error thrown on HTTP 401. Components can `instanceof` against this
+ * to distinguish "auth needed" from generic network failures.
+ */
+export class UnauthorizedError extends Error {
+  constructor(message = "Unauthorized") {
+    super(message);
+    this.name = "UnauthorizedError";
+    this.status = 401;
+  }
 }
 
 async function request(path, opts = {}) {
@@ -18,6 +37,14 @@ async function request(path, opts = {}) {
       ...(opts.headers || {}),
     },
   });
+
+  if (res.status === 401) {
+    // Broadcast so a global Login modal can prompt for the token without
+    // every caller needing to import auth state. Page-level useQuery
+    // listeners ignore the event by default — they just see the throw.
+    window.dispatchEvent(new CustomEvent(AUTH_EVENT));
+    throw new UnauthorizedError();
+  }
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
