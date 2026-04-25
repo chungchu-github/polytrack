@@ -34,6 +34,7 @@ export function initDB(dbPath) {
   migrateV5();
   migrateV6();
   migrateV7();
+  migrateV8();
   return db;
 }
 
@@ -268,6 +269,34 @@ function migrateV7() {
     for (const r of list) ins.run(r.address, r.tier || "BASIC", r.score || 0, r.last_scored);
   });
   tx(rows);
+}
+
+// ── Schema Migration v8 — multi-user auth (Phase 1) ─────────────────────────
+// Replaces the single global API_TOKEN with per-user accounts. Phase 1 keeps
+// data shared (no user_id columns yet); Phase 2 adds isolation.
+function migrateV8() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      username      TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      role          TEXT NOT NULL DEFAULT 'user',
+      created_at    INTEGER NOT NULL,
+      last_login    INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+
+    CREATE TABLE IF NOT EXISTS invitations (
+      token       TEXT PRIMARY KEY,
+      created_by  INTEGER NOT NULL,
+      used_by     INTEGER,
+      expires_at  INTEGER NOT NULL,
+      created_at  INTEGER NOT NULL,
+      FOREIGN KEY (created_by) REFERENCES users(id),
+      FOREIGN KEY (used_by)    REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_invitations_used ON invitations(used_by, expires_at);
+  `);
 }
 
 export function insertBacktest(row) {
@@ -814,4 +843,73 @@ export function getStats() {
   const lastScan = getLastScan();
 
   return { walletCount, eliteCount, signalCount, tradeCount, scanCount, lastScan };
+}
+
+// ── Users (V8 — Phase 1 auth) ────────────────────────────────────────────────
+
+/**
+ * Insert a user. Returns the new id. Throws on UNIQUE conflict (username).
+ */
+export function createUser({ username, passwordHash, role = "user" }) {
+  if (!username || !passwordHash) {
+    throw new Error("createUser requires username and passwordHash");
+  }
+  const r = db.prepare(`
+    INSERT INTO users (username, password_hash, role, created_at)
+    VALUES (?, ?, ?, ?)
+  `).run(username, passwordHash, role, Date.now());
+  return r.lastInsertRowid;
+}
+
+export function getUserByUsername(username) {
+  return db.prepare("SELECT * FROM users WHERE username = ?").get(username) || null;
+}
+
+export function getUserById(id) {
+  return db.prepare("SELECT id, username, role, created_at, last_login FROM users WHERE id = ?").get(id) || null;
+}
+
+export function updateUserLastLogin(id, t = Date.now()) {
+  db.prepare("UPDATE users SET last_login = ? WHERE id = ?").run(t, id);
+}
+
+export function countUsers() {
+  return db.prepare("SELECT COUNT(*) as count FROM users").get().count;
+}
+
+export function listUsers() {
+  return db.prepare(
+    "SELECT id, username, role, created_at, last_login FROM users ORDER BY id ASC"
+  ).all();
+}
+
+// ── Invitations (V8) ─────────────────────────────────────────────────────────
+
+export function createInvitationRow({ token, createdBy, expiresAt }) {
+  db.prepare(`
+    INSERT INTO invitations (token, created_by, expires_at, created_at)
+    VALUES (?, ?, ?, ?)
+  `).run(token, createdBy, expiresAt, Date.now());
+}
+
+export function getInvitation(token) {
+  return db.prepare("SELECT * FROM invitations WHERE token = ?").get(token) || null;
+}
+
+export function markInvitationUsed(token, userId) {
+  db.prepare("UPDATE invitations SET used_by = ? WHERE token = ?").run(userId, token);
+}
+
+export function deleteInvitation(token) {
+  return db.prepare("DELETE FROM invitations WHERE token = ?").run(token).changes;
+}
+
+/** List invitations created by an admin, with simple status derivation. */
+export function listInvitationsByAdmin(adminId) {
+  return db.prepare(`
+    SELECT token, created_by, used_by, expires_at, created_at
+      FROM invitations
+     WHERE created_by = ?
+     ORDER BY created_at DESC
+  `).all(adminId);
 }

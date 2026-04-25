@@ -53,7 +53,14 @@ import { runBacktest } from "./backtest/engine.js";
 import {
   insertBacktest, completeBacktest, getBacktest, listBacktests, deleteBacktest,
   getTradesPnlByStrategy, getWalletDegradationCandidates,
+  createUser, getUserByUsername, getUserById, updateUserLastLogin, countUsers,
+  createInvitationRow, getInvitation, markInvitationUsed, deleteInvitation,
+  listInvitationsByAdmin,
 } from "./db.js";
+import {
+  hashPassword, verifyPassword, signJwt, verifyJwt, getJwtSecret,
+  generateInviteToken, inviteExpiry,
+} from "./auth.js";
 
 dotenv.config();
 
@@ -63,7 +70,6 @@ const PORT            = Number(process.env.PORT || 3001);
 // 127.0.0.1 so a misconfigured deployment doesn't expose the dashboard
 // publicly — safer when ufw isn't in front.
 const HOST            = process.env.HOST || "127.0.0.1";
-const API_TOKEN       = process.env.API_TOKEN || "";
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "http://localhost:5173,http://localhost:3000,http://localhost:3001").split(",").map(s => s.trim());
 const PRIVATE_KEY     = process.env.PRIVATE_KEY || "";
 const FUNDER_ADDRESS  = process.env.FUNDER_ADDRESS || "";
@@ -77,16 +83,16 @@ const SLIPPAGE_PCT    = Number(process.env.SLIPPAGE_PCT || 2);
 const SCAN_INTERVAL   = Number(process.env.SCAN_INTERVAL || 60);
 const FAILURE_BREAKER_THRESHOLD = Number(process.env.FAILURE_BREAKER_THRESHOLD || 3);
 
-// Startup safety — refuse to run in production without an API token.
-// Without API_TOKEN, requireAuth() lets everything through (intentional for
-// local dev). A production server without a token is a publicly-exposed
-// wallet controller, so crash loudly instead of silently accepting traffic.
-if (process.env.NODE_ENV === "production" && !API_TOKEN) {
+// Startup safety — refuse to run in production without a JWT secret.
+// Phase 1 multi-user auth signs every session token with this secret; if
+// it's missing, login still "works" but tokens are valid only for this
+// boot and silently fall back to a dev constant — definitely not what
+// you want on a server controlling money.
+try {
+  getJwtSecret(); // throws in production when JWT_SECRET is missing
+} catch (e) {
   // eslint-disable-next-line no-console
-  console.error(
-    "[polytrack] FATAL: API_TOKEN env var is required when NODE_ENV=production. " +
-    "Generate one with `openssl rand -hex 32` and set it in .env."
-  );
+  console.error(`[polytrack] FATAL: ${e.message}`);
   process.exit(1);
 }
 
@@ -106,11 +112,18 @@ hydrateFromDB(state);
 log.db(`Database initialized. Hydrated ${state.wallets.size} wallets, ${state.autoTrades.length} trades from disk.`);
 
 // ── Auth Middleware ───────────────────────────────────────────────────────────
+// Bearer JWT carries { userId, role }. On success, req.user is populated.
 function requireAuth(req, res, next) {
-  if (!API_TOKEN) return next();
-  const token = req.headers.authorization?.replace("Bearer ", "");
-  if (token !== API_TOKEN) {
-    return res.status(401).json({ error: "Unauthorized" });
+  const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
+  const payload = verifyJwt(token);
+  if (!payload) return res.status(401).json({ error: "Unauthorized" });
+  req.user = payload;
+  next();
+}
+
+function requireAdmin(req, res, next) {
+  if (req.user?.role !== "admin") {
+    return res.status(403).json({ error: "Forbidden — admin role required" });
   }
   next();
 }
@@ -144,6 +157,95 @@ const globalLimiter = rateLimit({
   message: { error: "Rate limited" },
 });
 app.use(globalLimiter);
+
+// ── Auth endpoints (V8 — Phase 1) ────────────────────────────────────────────
+// Login attempts get a stricter limiter to slow brute-force.
+const loginLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many login attempts" },
+});
+
+app.post("/auth/login", loginLimiter, async (req, res) => {
+  const { username, password } = req.body || {};
+  if (!username || !password) {
+    return res.status(400).json({ error: "username and password required" });
+  }
+  const user = getUserByUsername(username);
+  if (!user || !(await verifyPassword(password, user.password_hash))) {
+    // Same response for both cases — no user enumeration.
+    return res.status(401).json({ error: "Invalid username or password" });
+  }
+  updateUserLastLogin(user.id);
+  const token = signJwt({ userId: user.id, role: user.role });
+  res.json({
+    token,
+    user: { id: user.id, username: user.username, role: user.role },
+  });
+});
+
+app.post("/auth/logout", (_req, res) => {
+  // Stateless JWT — client just drops the token. We respond 200 so the UI
+  // gets a clear acknowledgement and can clear local state.
+  res.json({ ok: true });
+});
+
+app.get("/auth/me", requireAuth, (req, res) => {
+  const user = getUserById(req.user.userId);
+  if (!user) return res.status(401).json({ error: "User not found" });
+  res.json({ user });
+});
+
+app.post("/auth/invite", requireAuth, requireAdmin, (req, res) => {
+  const token = generateInviteToken();
+  const expiresAt = inviteExpiry();
+  createInvitationRow({ token, createdBy: req.user.userId, expiresAt });
+  res.json({
+    token,
+    expiresAt,
+    url: `/register?invite=${token}`,
+  });
+});
+
+app.get("/auth/invitations", requireAuth, requireAdmin, (req, res) => {
+  res.json(listInvitationsByAdmin(req.user.userId));
+});
+
+app.delete("/auth/invitations/:token", requireAuth, requireAdmin, (req, res) => {
+  const changed = deleteInvitation(req.params.token);
+  res.json({ deleted: changed });
+});
+
+app.post("/auth/register", loginLimiter, async (req, res) => {
+  const { invite_token, username, password } = req.body || {};
+  if (!invite_token || !username || !password) {
+    return res.status(400).json({ error: "invite_token, username, password required" });
+  }
+  if (password.length < 8) {
+    return res.status(400).json({ error: "Password must be at least 8 characters" });
+  }
+  const inv = getInvitation(invite_token);
+  if (!inv) return res.status(400).json({ error: "Invalid invite" });
+  if (inv.used_by)               return res.status(400).json({ error: "Invite already used" });
+  if (inv.expires_at < Date.now()) return res.status(400).json({ error: "Invite expired" });
+
+  if (getUserByUsername(username)) {
+    return res.status(400).json({ error: "Username already taken" });
+  }
+  let userId;
+  try {
+    const hash = await hashPassword(password);
+    userId = createUser({ username, passwordHash: hash, role: "user" });
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+  markInvitationUsed(invite_token, userId);
+  updateUserLastLogin(userId);
+  const token = signJwt({ userId, role: "user" });
+  res.json({ token, user: { id: userId, username, role: "user" } });
+});
 
 // Serve frontend build in production
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -974,10 +1076,13 @@ app.get("*", (req, res) => {
 });
 
 // ── Socket.IO ────────────────────────────────────────────────────────────────
+// JWT auth — same secret as REST endpoints. Frontend passes the token via
+// io.connect's `auth: { token }` handshake.
 io.use((socket, next) => {
-  if (!API_TOKEN) return next();
   const token = socket.handshake.auth?.token;
-  if (token !== API_TOKEN) return next(new Error("Unauthorized"));
+  const payload = verifyJwt(token);
+  if (!payload) return next(new Error("Unauthorized"));
+  socket.user = payload;
   next();
 });
 
@@ -1113,7 +1218,7 @@ process.on("uncaughtException", (err) => {
 httpServer.listen(PORT, HOST, async () => {
   log.info(`POLYTRACK v2.1.0 — listening on http://${HOST}:${PORT}`);
   log.info(`Auto-copy: ${state.autoEnabled ? "ON" : "OFF"} | Max trade: $${MAX_TRADE_USDC} | Slippage: ${SLIPPAGE_PCT}% | Threshold: ${MIN_WALLETS}+ ELITE | Interval: ${SCAN_INTERVAL}s`);
-  log.info(`Private key: ${PRIVATE_KEY ? "SET" : "NOT SET (simulated)"} | Auth: ${API_TOKEN ? "SET" : "OPEN"} | CORS: ${ALLOWED_ORIGINS.join(", ")}`);
+  log.info(`Private key: ${PRIVATE_KEY ? "SET" : "NOT SET (simulated)"} | Auth: JWT (${countUsers()} users) | CORS: ${ALLOWED_ORIGINS.join(", ")}`);
   if (!PRIVATE_KEY || !FUNDER_ADDRESS) {
     log.warn("⚠ SIMULATION MODE — PRIVATE_KEY or FUNDER_ADDRESS not set. All trades will be simulated, no real orders will be placed.");
   }

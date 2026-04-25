@@ -3,23 +3,24 @@ import { useQueryClient } from "@tanstack/react-query";
 import { setToken, hasToken } from "../api/client.js";
 
 /**
- * Token gate. Shown when:
- *   1. No token in localStorage on first mount
+ * Username/password gate. Shown when:
+ *   1. No JWT in localStorage on first mount
  *   2. Any API call dispatches "polytrack:auth-required" (HTTP 401)
  *
- * After a successful save, invalidates every React Query cache so all
- * pages refetch with the new token rather than reloading the whole app.
+ * On successful login we save the JWT, close, and reset every cached
+ * query so all pages refetch with the new token.
  */
 export default function LoginModal() {
   const qc = useQueryClient();
-  const [open, setOpen]       = useState(() => !hasToken());
-  const [value, setValue]     = useState("");
-  const [error, setError]     = useState("");
-  const [busy, setBusy]       = useState(false);
+  const [open, setOpen]     = useState(() => !hasToken());
+  const [username, setU]    = useState("");
+  const [password, setP]    = useState("");
+  const [error, setError]   = useState("");
+  const [busy, setBusy]     = useState(false);
 
   useEffect(() => {
     function onAuthRequired() {
-      setError("Token rejected — re-enter the API_TOKEN from your VPS .env.");
+      setError("Session expired or invalid — please sign in again.");
       setOpen(true);
     }
     window.addEventListener("polytrack:auth-required", onAuthRequired);
@@ -28,33 +29,30 @@ export default function LoginModal() {
 
   async function submit(e) {
     e.preventDefault();
-    const trimmed = value.trim();
-    if (!trimmed) {
-      setError("Token is required.");
+    if (!username.trim() || !password) {
+      setError("Username and password are required.");
       return;
     }
     setBusy(true);
     setError("");
     try {
-      // Probe a protected endpoint to validate before we commit.
-      const res = await fetch("/wallets", {
-        headers: { Authorization: `Bearer ${trimmed}` },
+      const res = await fetch("/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: username.trim(), password }),
       });
-      if (res.status === 401) {
-        setError("Server rejected the token. Check it matches .env on the VPS.");
-        setBusy(false);
-        return;
-      }
+      const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setError(`Server returned HTTP ${res.status}. Try again.`);
+        setError(body.error || `Login failed (HTTP ${res.status})`);
         setBusy(false);
         return;
       }
-      setToken(trimmed);
+      setToken(body.token);
       setOpen(false);
-      setValue("");
-      // Refresh every cached query so the UI redraws with authorised data.
-      qc.invalidateQueries();
+      setU(""); setP(""); setBusy(false);
+      // resetQueries() (vs invalidateQueries) clears prior 401 error state too,
+      // so the dashboard refetches cleanly without the race we hit pre-Phase 1.
+      qc.resetQueries();
     } catch (e) {
       setError(`Network error: ${e.message}`);
       setBusy(false);
@@ -71,25 +69,35 @@ export default function LoginModal() {
       >
         <div>
           <h2 className="font-display text-lg font-bold tracking-wider text-primary">
-            ◆ AUTHENTICATE
+            ◆ SIGN IN
           </h2>
           <p className="text-2xs text-surface-500 mt-1">
-            Paste the API_TOKEN from your server's <code>.env</code>.
+            Username and password set by your admin.
           </p>
         </div>
 
         <div className="space-y-1">
-          <label className="text-2xs uppercase tracking-wider text-surface-400">
-            API Token
-          </label>
+          <label className="text-2xs uppercase tracking-wider text-surface-400">Username</label>
           <input
-            type="password"
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
+            type="text"
+            value={username}
+            onChange={(e) => setU(e.target.value)}
             autoFocus
             disabled={busy}
-            placeholder="64-character hex string"
-            className="w-full px-3 py-2 rounded-md bg-surface-900 border border-surface-700 text-surface-100 font-mono text-sm focus:outline-none focus:border-primary disabled:opacity-50"
+            autoComplete="username"
+            className="w-full px-3 py-2 rounded-md bg-surface-900 border border-surface-700 text-surface-100 text-sm focus:outline-none focus:border-primary disabled:opacity-50"
+          />
+        </div>
+
+        <div className="space-y-1">
+          <label className="text-2xs uppercase tracking-wider text-surface-400">Password</label>
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setP(e.target.value)}
+            disabled={busy}
+            autoComplete="current-password"
+            className="w-full px-3 py-2 rounded-md bg-surface-900 border border-surface-700 text-surface-100 text-sm focus:outline-none focus:border-primary disabled:opacity-50"
           />
         </div>
 
@@ -101,14 +109,14 @@ export default function LoginModal() {
 
         <button
           type="submit"
-          disabled={busy || !value.trim()}
+          disabled={busy || !username.trim() || !password}
           className="w-full px-4 py-2 rounded-md bg-primary text-surface-950 font-semibold text-sm hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         >
-          {busy ? "Verifying…" : "Sign in"}
+          {busy ? "Signing in…" : "Sign in"}
         </button>
 
         <p className="text-2xs text-surface-600 text-center">
-          Token is stored in localStorage. Clear it via DevTools to log out.
+          No account? Ask the admin for an invite link.
         </p>
       </form>
     </div>
