@@ -231,17 +231,135 @@ export async function fetchWalletPositions(addr) {
   return Array.isArray(data) ? data : [];
 }
 
+// ── Leaderboard scraping ────────────────────────────────────────────────────
+//
+// Polymarket retired their public data-api leaderboard endpoint. The web app
+// now hydrates the leaderboard via the Next.js `_next/data/<buildId>/...json`
+// route. The buildId rotates on every Polymarket deploy so we have to fetch
+// the homepage HTML, regex it out, then fetch the data file.
+//
+// Cached for 10 minutes to avoid pounding the homepage on every scan.
+
+const POLYMARKET_HOST = "https://polymarket.com";
+const BUILD_ID_TTL_MS = 10 * 60_000;
+let _buildIdCache = { id: null, fetchedAt: 0 };
+
+const BROWSER_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+  "(KHTML, like Gecko) Chrome/130.0 Safari/537.36";
+
 /**
- * Fetch leaderboard wallets.
- * Throws on failure — caller should fall back to seed wallets.
+ * Pull the Next.js buildId out of the homepage HTML. Exported pure so tests
+ * can feed in a fixture without hitting the network.
+ *
+ * @returns {string | null}
  */
-export async function fetchLeaderboard({ window = "7d", limit = 20 } = {}) {
-  const data = await apiFetch(
-    `${DATA_API}/leaderboard?window=${window}&limit=${limit}`
-  );
-  return (Array.isArray(data) ? data : [])
-    .map(u => (u.proxyWallet || u.address || "").toLowerCase())
-    .filter(Boolean);
+export function extractBuildId(html) {
+  if (typeof html !== "string") return null;
+  const m = html.match(/"buildId":"(build-[A-Za-z0-9_-]+)"/);
+  return m ? m[1] : null;
+}
+
+/**
+ * Normalise the dehydrated Next.js Query payload into a flat array of
+ * { proxyWallet, pnl, volume, pseudonym, rank }. Exported pure for testing.
+ */
+export function parseLeaderboardJson(payload) {
+  const queries = payload?.pageProps?.dehydratedState?.queries;
+  if (!Array.isArray(queries) || queries.length === 0) return [];
+  // Some routes include multiple queries (e.g. one per category). The
+  // leaderboard route puts the rows in the first one's data array.
+  const data = queries[0]?.state?.data;
+  if (!Array.isArray(data)) return [];
+  return data
+    .map(r => ({
+      rank:        Number(r.rank) || null,
+      proxyWallet: (r.proxyWallet || r.address || "").toLowerCase(),
+      pnl:         Number(r.pnl) || 0,
+      volume:      Number(r.volume ?? r.amount) || 0,
+      pseudonym:   r.pseudonym || r.name || null,
+    }))
+    .filter(r => /^0x[a-f0-9]{40}$/.test(r.proxyWallet));
+}
+
+async function getBuildId({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && _buildIdCache.id && now - _buildIdCache.fetchedAt < BUILD_ID_TTL_MS) {
+    return _buildIdCache.id;
+  }
+  const res = await fetch(`${POLYMARKET_HOST}/leaderboard`, {
+    headers: { "User-Agent": BROWSER_UA },
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!res.ok) throw new Error(`Polymarket homepage returned ${res.status}`);
+  const html = await res.text();
+  const id = extractBuildId(html);
+  if (!id) throw new Error("Could not locate buildId in Polymarket homepage HTML");
+  _buildIdCache = { id, fetchedAt: now };
+  return id;
+}
+
+/**
+ * Fetch a single leaderboard window as normalised rows. Default returns
+ * Polymarket's "overall / alltime / sort=profit" view; override via opts.
+ *
+ * Returns full rows (not just addresses) so callers can filter by ROI.
+ *
+ * @param {object} opts
+ * @param {string} [opts.category]  e.g. "overall" | "sports" | "crypto"
+ * @param {string} [opts.time]      "alltime" | "monthly" | "weekly" | "daily"
+ * @param {string} [opts.sort]      "profit" | "volume"
+ */
+export async function fetchLeaderboardRaw(opts = {}) {
+  const {
+    category = "overall",
+    time     = "alltime",
+    sort     = "profit",
+  } = opts;
+  const params = new URLSearchParams({ category, time, sort });
+  const fetchOnce = async (buildId) => {
+    const url = `${POLYMARKET_HOST}/_next/data/${buildId}/en/leaderboard.json?${params}`;
+    const res = await fetch(url, {
+      headers: { "User-Agent": BROWSER_UA },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (res.status === 404) {
+      // buildId rotated mid-flight — caller will retry.
+      const err = new Error("buildId stale (404)");
+      err.code = "BUILD_ID_STALE";
+      throw err;
+    }
+    if (!res.ok) throw new Error(`Leaderboard fetch ${res.status}`);
+    return res.json();
+  };
+
+  let buildId = await getBuildId();
+  let payload;
+  try {
+    payload = await fetchOnce(buildId);
+  } catch (e) {
+    if (e.code === "BUILD_ID_STALE") {
+      buildId = await getBuildId({ force: true });
+      payload = await fetchOnce(buildId);
+    } else {
+      throw e;
+    }
+  }
+  return parseLeaderboardJson(payload);
+}
+
+/**
+ * Backward-compatible thin wrapper used by the scan loop. Returns just the
+ * lower-cased addresses, like the old data-api version did.
+ */
+export async function fetchLeaderboard({ time = "alltime", limit = 20 } = {}) {
+  try {
+    const rows = await fetchLeaderboardRaw({ time, sort: "profit" });
+    return rows.slice(0, limit).map(r => r.proxyWallet);
+  } catch (e) {
+    log.warn(`fetchLeaderboard failed: ${e.message}`);
+    return [];
+  }
 }
 
 /**

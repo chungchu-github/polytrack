@@ -332,7 +332,7 @@ async function runScan() {
     // 2. Build watch list: seed + leaderboard
     let watchList = [...new Set(SEED_WALLETS)];
     try {
-      const lbAddrs = await fetchLeaderboard({ window: "7d", limit: 20 });
+      const lbAddrs = await fetchLeaderboard({ time: "weekly", limit: 20 });
       watchList = [...new Set([...lbAddrs, ...watchList])].slice(0, 25);
       log.scan(`Watch list: ${watchList.length} wallets`);
     } catch { log.warn("Leaderboard fetch failed, using seed wallets"); }
