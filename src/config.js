@@ -30,6 +30,15 @@ const DEFAULTS = {
     meanrev:   { enabled: false, maxTradeUsdc: 50,  minStrength: 55, lookbackDays: 7,  zScoreThreshold: 2.0 },
     arbitrage: { enabled: false, maxTradeUsdc: 200, minStrength: 70, minEdgePct: 1.5 },
   },
+  // P0 #4 — auto-exit / stop-loss for filled positions.
+  // Disabled by default so existing deployments don't surprise-sell anything.
+  // maxHoldDays:  0 disables time-based exit (otherwise: exit any FILLED trade older than N days)
+  // stopLossPct:  0 disables loss-based exit (otherwise: positive fraction, e.g. 0.30 = exit at -30%)
+  exitPolicy: {
+    enabled: false,
+    maxHoldDays: 14,
+    stopLossPct: 0.30,
+  },
 };
 
 const ALLOWED_KEYS = new Set(Object.keys(DEFAULTS));
@@ -60,6 +69,10 @@ export function saveConfig(patch) {
       next.strategies = mergeStrategies(current.strategies || DEFAULTS.strategies, v);
       continue;
     }
+    if (k === "exitPolicy" && v && typeof v === "object") {
+      next.exitPolicy = mergeExitPolicy(current.exitPolicy || DEFAULTS.exitPolicy, v);
+      continue;
+    }
     if (typeof DEFAULTS[k] === "number") {
       const n = Number(v);
       if (!Number.isFinite(n) || n < 0) continue;
@@ -72,6 +85,19 @@ export function saveConfig(patch) {
   writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2));
   cache = next;
   return next;
+}
+
+function mergeExitPolicy(existing, patch) {
+  const base = existing || DEFAULTS.exitPolicy;
+  const out = { ...base };
+  if (typeof patch.enabled === "boolean") out.enabled = patch.enabled;
+  if (Number.isFinite(Number(patch.maxHoldDays)) && Number(patch.maxHoldDays) >= 0) {
+    out.maxHoldDays = Number(patch.maxHoldDays);
+  }
+  if (Number.isFinite(Number(patch.stopLossPct)) && Number(patch.stopLossPct) >= 0 && Number(patch.stopLossPct) <= 1) {
+    out.stopLossPct = Number(patch.stopLossPct);
+  }
+  return out;
 }
 
 function mergeStrategies(existing, patch) {

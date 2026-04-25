@@ -35,6 +35,7 @@ export function initDB(dbPath) {
   migrateV6();
   migrateV7();
   migrateV8();
+  migrateV9();
   return db;
 }
 
@@ -299,6 +300,30 @@ function migrateV8() {
   `);
 }
 
+// ── Schema Migration v9 — auto-exit / stop-loss bookkeeping (P0 #4) ─────────
+// Five additive trade columns so we can:
+//   - know how many tokens we hold (fill_size) when constructing a SELL
+//   - know what we paid (fill_price) for honest mark-to-market PnL
+//   - mark a trade as exited so we never double-sell
+//   - record why we exited (max_hold / stop_loss / manual) for telemetry
+//   - keep the SELL order's CLOB id separate from the original buy
+function migrateV9() {
+  const cols = db.prepare("PRAGMA table_info(trades)").all().map(c => c.name);
+  const adds = [
+    ["fill_size",     "REAL"],
+    ["fill_price",    "REAL"],
+    ["exited_at",     "INTEGER"],
+    ["exit_reason",   "TEXT"],
+    ["exit_price",    "REAL"],
+    ["exit_order_id", "TEXT"],
+  ];
+  for (const [name, type] of adds) {
+    if (!cols.includes(name)) {
+      db.exec(`ALTER TABLE trades ADD COLUMN ${name} ${type}`);
+    }
+  }
+}
+
 export function insertBacktest(row) {
   const r = db.prepare(`
     INSERT INTO backtests (name, date_start, date_end, strategy, config_json,
@@ -396,6 +421,24 @@ export function getPositionHistory(walletAddress, sinceMs = 0, untilMs = Date.no
 
 export function deleteOldMarketSnapshots(cutoffMs) {
   return db.prepare("DELETE FROM market_snapshots WHERE timestamp < ?").run(cutoffMs).changes;
+}
+
+/**
+ * Latest market snapshot for a single token. Used by the auto-exit cron to
+ * mark-to-market filled positions without spamming the Polymarket API.
+ *
+ * Returns the row (with mid_price / best_bid / best_ask / timestamp) or null
+ * if the token has no snapshots in the last 24h (older data is too stale to
+ * trust for stop-loss decisions).
+ */
+export function getLatestSnapshotForToken(tokenId, maxAgeMs = 24 * 60 * 60 * 1000) {
+  const cutoff = Date.now() - maxAgeMs;
+  return db.prepare(
+    `SELECT * FROM market_snapshots
+      WHERE token_id = ? AND timestamp >= ?
+      ORDER BY timestamp DESC
+      LIMIT 1`
+  ).get(tokenId, cutoff) || null;
 }
 
 export function deleteOldPositionHistory(cutoffMs) {
@@ -763,8 +806,9 @@ export function insertTrade(trade) {
   const result = db.prepare(`
     INSERT INTO trades (signal_id, condition_id, direction, token_id,
       size_usdc, mid_price, limit_price, order_id, status, error_message,
-      tx_hash, wallet_count, strength, title, created_at, filled_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      tx_hash, wallet_count, strength, title, created_at, filled_at,
+      fill_size, fill_price)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     trade.signalId || null,
     trade.conditionId,
@@ -781,7 +825,9 @@ export function insertTrade(trade) {
     trade.strength || null,
     trade.title || null,
     trade.executedAt || Date.now(),
-    trade.filledAt || null
+    trade.filledAt || null,
+    trade.filledSize  ?? trade.fillSize  ?? null,
+    trade.filledPrice ?? trade.fillPrice ?? null
   );
   return result.lastInsertRowid;
 }
@@ -792,6 +838,43 @@ export function getRecentTrades(limit = 100) {
 
 export function updateTradeStatus(id, status, filledAt) {
   db.prepare("UPDATE trades SET status = ?, filled_at = ? WHERE id = ?").run(status, filledAt, id);
+}
+
+/**
+ * Persist actual fill quantities once verifyFill returns. Without this we
+ * cannot construct a SELL order at exit time (we'd have nothing to back
+ * the makerAmount with).
+ */
+export function recordTradeFill(id, { fillSize, fillPrice }) {
+  db.prepare(
+    "UPDATE trades SET fill_size = ?, fill_price = ? WHERE id = ?"
+  ).run(fillSize ?? null, fillPrice ?? null, id);
+}
+
+/**
+ * All currently-held positions: FILLED or PARTIAL trades that have not yet
+ * been marked as exited. Used by the auto-exit cron.
+ */
+export function getOpenFilledTrades() {
+  return db.prepare(`
+    SELECT * FROM trades
+     WHERE status IN ('FILLED','PARTIAL')
+       AND exited_at IS NULL
+     ORDER BY filled_at ASC
+  `).all();
+}
+
+/**
+ * Mark a trade as exited after the SELL order completes. Idempotent: a
+ * second call with the same id silently no-ops thanks to exited_at IS NULL
+ * being checked by the auto-exit query above.
+ */
+export function markTradeExited(id, { exitReason, exitPrice, exitOrderId, exitedAt = Date.now() }) {
+  db.prepare(`
+    UPDATE trades
+       SET exited_at = ?, exit_reason = ?, exit_price = ?, exit_order_id = ?
+     WHERE id = ?
+  `).run(exitedAt, exitReason || null, exitPrice ?? null, exitOrderId || null, id);
 }
 
 export function getStalePendingTrades(maxAgeMs = 5 * 60_000) {
