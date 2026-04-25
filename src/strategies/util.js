@@ -36,3 +36,80 @@ export function isSentinelSnap(snap, opts = {}) {
   if (ask - bid > maxSpread) return true;
   return false;
 }
+
+/**
+ * Same liquidity gate as isSentinelSnap, but tolerates orderbook shape
+ * `{ bids: [{price,size}], asks: [{price,size}] }` returned by the live
+ * Polymarket API. Used during the scan's pre-filter pass — we have fresh
+ * orderbooks in memory before snapshots have been persisted.
+ *
+ * Why a separate function: callers in strategies read DB rows
+ * (best_bid / best_ask), but the in-scan pre-filter sees raw API books.
+ * Mapping every site is more error-prone than two tiny shapes.
+ */
+function bookHasRealLiquidity(book, opts = {}) {
+  const { minLiquidBid = 0.02, maxSpread = 0.10 } = opts;
+  if (!book || !Array.isArray(book.bids) || !Array.isArray(book.asks)) return false;
+  const bid = book.bids.length ? Number(book.bids[0].price) : null;
+  const ask = book.asks.length ? Number(book.asks[0].price) : null;
+  if (bid == null || ask == null) return false;
+  if (!Number.isFinite(bid) || bid <= minLiquidBid) return false;
+  if (!Number.isFinite(ask) || ask >= 1 - minLiquidBid) return false;
+  if (ask - bid > maxSpread) return false;
+  return true;
+}
+
+/**
+ * Filter event list down to events whose outcome tokens have real, tradeable
+ * liquidity right now. An event passes if AT LEAST ONE of its outcome tokens
+ * has a non-sentinel orderbook in `byToken`. We don't require all outcomes
+ * because a one-sided liquid market is still tradeable with momentum/meanrev
+ * (single-leg). Arbitrage's `hasRealLiquidity` check enforces the stricter
+ * "both legs liquid" rule downstream.
+ *
+ * Top-100-events from /events?order=volume_24hr is event-level: the volume
+ * accumulated yesterday says nothing about whether outcome tokens have
+ * orderbooks today. Polymarket returns sentinel pricing (0.01/0.99) for
+ * dead outcomes, which produced 45 phantom strength=100 arbitrage signals
+ * in production. This pre-filter prevents strategies from ever seeing
+ * those events.
+ *
+ * @param {Array} events     fetchMarkets() output (events with .markets[].tokens[])
+ * @param {Map}   byToken    tokenId → orderbook from fetchOrderBooks()
+ * @param {object} [opts]    { minLiquidBid?, maxSpread?, cap? }
+ * @returns {{events: Array, stats: {fetched, liquid, dropped}}}
+ */
+export function filterLiquidMarkets(events, byToken, opts = {}) {
+  const { cap = 30 } = opts;
+  const fetched = (events || []).length;
+  const liquid = [];
+
+  for (const evt of events || []) {
+    let hasOneLiquid = false;
+    for (const m of evt.markets || []) {
+      const tokens = Array.isArray(m.tokens) ? m.tokens : [];
+      for (const tok of tokens) {
+        const tokenId = String(tok?.token_id || tok?.tokenId || tok || "");
+        if (!tokenId) continue;
+        if (bookHasRealLiquidity(byToken?.get?.(tokenId), opts)) {
+          hasOneLiquid = true;
+          break;
+        }
+      }
+      if (hasOneLiquid) break;
+    }
+    if (hasOneLiquid) liquid.push(evt);
+  }
+
+  // Sort already from upstream (volume_24hr desc). Just cap.
+  const used = liquid.slice(0, cap);
+  return {
+    events: used,
+    stats: {
+      fetched,
+      liquid: liquid.length,
+      used: used.length,
+      dropped: fetched - liquid.length,
+    },
+  };
+}

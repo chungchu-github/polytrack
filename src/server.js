@@ -50,6 +50,7 @@ import { initMonitoring, captureException, flushMonitoring } from "./monitoring.
 import { checkClockSkew } from "./time-check.js";
 import { captureMarketSnapshot, captureWalletPositions, pruneOldSnapshots } from "./datacapture.js";
 import { HistoryReader } from "./backtest/history.js";
+import { filterLiquidMarkets } from "./strategies/util.js";
 import { runBacktest } from "./backtest/engine.js";
 import {
   insertBacktest, completeBacktest, getBacktest, listBacktests, deleteBacktest,
@@ -328,10 +329,42 @@ async function runScan() {
   emit("scan:start", {});
 
   try {
-    // 1. Fetch markets
-    state.markets = await fetchMarkets({ limit: 20 });
+    // 1. Fetch markets — over-fetch to top 100 by 24h volume, then filter
+    //    by real orderbook liquidity. event-level volume_24hr is a poor
+    //    proxy for "outcome tokens have a tradeable book RIGHT NOW" —
+    //    Polymarket returns sentinel pricing (0.01/0.99) for dead outcomes,
+    //    which previously fed every strategy phantom signals (PR #20/#21).
+    const fetched = await fetchMarkets({ limit: 100 });
+    log.scan(`Fetched ${fetched.length} events; capturing orderbooks…`);
+
+    // 2. Capture snapshots NOW (was step 7) — gives us fresh orderbook data
+    //    to filter on before strategies run. Same code, just reordered.
+    let capByToken = new Map();
+    try {
+      const capResult = await captureMarketSnapshot(fetched);
+      capByToken = capResult?.byToken || new Map();
+      state.lastCaptureResult = {
+        at:       Date.now(),
+        inserted: capResult?.inserted ?? 0,
+        failed:   capResult?.failed   ?? 0,
+        // positionsInserted filled in after wallet scan
+        positionsInserted: 0,
+      };
+    } catch (e) {
+      state.lastCaptureResult = { at: Date.now(), inserted: 0, failed: 0, error: e.message };
+      log.warn(`Data capture failed: ${e.message}`);
+    }
+
+    // 3. Filter to liquid markets only — drops sentinel/no-orderbook events
+    //    so momentum/meanrev/arbitrage all see the same actionable subset.
+    const filtered = filterLiquidMarkets(fetched, capByToken, { cap: 30 });
+    state.markets = filtered.events;
+    state.lastMarketFilter = filtered.stats;
+    log.scan(
+      `Markets: ${filtered.stats.fetched} fetched → ${filtered.stats.liquid} liquid → ` +
+      `${filtered.stats.used} used (${filtered.stats.dropped} sentinels dropped)`
+    );
     emit("markets", state.markets);
-    log.scan(`Loaded ${state.markets.length} markets`);
 
     // 2. Build watch list: seed + currently-tracked + leaderboard, then drop
     //    anything the operator soft-deleted. Capped at 50 to stay under
@@ -475,25 +508,21 @@ async function runScan() {
       log.warn(`Resolution check failed: ${e.message}`);
     }
 
-    // 7. Data capture — persist snapshots for F2/F3 (best-effort, non-fatal).
-    //    Cache the result on state so /health can surface it to the V1 gate UI.
+    // 7. Wallet position snapshots — kept here (after walletList loaded) so
+    //    captureWalletPositions sees the freshly-loaded positions.
+    //    Market snapshots already captured in step 2.
     try {
-      const capResult = await captureMarketSnapshot(state.markets);
-      const posRows   = captureWalletPositions(state);
-      state.lastCaptureResult = {
-        at:       Date.now(),
-        inserted: capResult?.inserted ?? 0,
-        failed:   capResult?.failed   ?? 0,
-        positionsInserted: posRows || 0,
-      };
+      const posRows = captureWalletPositions(state);
+      if (state.lastCaptureResult) {
+        state.lastCaptureResult.positionsInserted = posRows || 0;
+      }
       log.db(
-        `Data capture: ${state.lastCaptureResult.inserted} market snapshots, ` +
-        `${state.lastCaptureResult.failed} failed, ` +
-        `${state.lastCaptureResult.positionsInserted} position rows`
+        `Data capture: ${state.lastCaptureResult?.inserted ?? 0} market snapshots, ` +
+        `${state.lastCaptureResult?.failed ?? 0} failed, ` +
+        `${posRows || 0} position rows`
       );
     } catch (e) {
-      state.lastCaptureResult = { at: Date.now(), inserted: 0, failed: 0, error: e.message };
-      log.warn(`Data capture failed: ${e.message}`);
+      log.warn(`Position capture failed: ${e.message}`);
     }
 
     state.lastScan = new Date();
@@ -621,6 +650,7 @@ app.get("/health", (_, res) => {
     db: dbStats,
     dataCapture,
     degradationCandidates,
+    markets: state.lastMarketFilter || null,
     autoImport: {
       lastRunAt: state.lastAutoImportAt || null,
       lastResult: state.lastAutoImportResult || null,

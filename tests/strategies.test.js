@@ -374,3 +374,73 @@ describe("StrategyEngine", () => {
     });
   });
 });
+
+// ── filterLiquidMarkets (PR liquid-filter) ──────────────────────────────────
+import { filterLiquidMarkets } from "../src/strategies/util.js";
+
+describe("filterLiquidMarkets", () => {
+  // Helpers — Polymarket API book shape: { bids: [{price,size}], asks: [{price,size}] }
+  const liquidBook  = () => ({ bids: [{ price: 0.45, size: 100 }], asks: [{ price: 0.47, size: 100 }] });
+  const sentinelBook = () => ({ bids: [{ price: 0.01, size: 100 }], asks: [{ price: 0.99, size: 100 }] });
+  const event = (id, tokenSpecs) => ({
+    id, slug: `e${id}`, title: `Event ${id}`,
+    markets: [{
+      conditionId: `c${id}`,
+      tokens: tokenSpecs.map(([token_id, _book]) => ({ token_id })),
+    }],
+  });
+
+  it("keeps events where ≥1 outcome has real liquidity", () => {
+    const events = [event(1, [["tA", "real"], ["tB", "sentinel"]])];
+    const byToken = new Map([
+      ["tA", liquidBook()],
+      ["tB", sentinelBook()],
+    ]);
+    const r = filterLiquidMarkets(events, byToken);
+    assert.equal(r.events.length, 1);
+    assert.equal(r.stats.fetched, 1);
+    assert.equal(r.stats.liquid, 1);
+    assert.equal(r.stats.dropped, 0);
+  });
+
+  it("drops events where ALL outcomes are sentinel (the production bug case)", () => {
+    const events = [event(1, [["tA", "sentinel"], ["tB", "sentinel"]])];
+    const byToken = new Map([
+      ["tA", sentinelBook()],
+      ["tB", sentinelBook()],
+    ]);
+    const r = filterLiquidMarkets(events, byToken);
+    assert.equal(r.events.length, 0);
+    assert.equal(r.stats.dropped, 1);
+  });
+
+  it("drops events with missing book entries (no orderbook fetched)", () => {
+    const events = [event(1, [["tMissing", "?"]])];
+    const byToken = new Map();        // empty — fetchOrderBooks returned nothing
+    const r = filterLiquidMarkets(events, byToken);
+    assert.equal(r.events.length, 0);
+    assert.equal(r.stats.dropped, 1);
+  });
+
+  it("caps at `cap` even if more liquid events exist", () => {
+    const events = Array.from({ length: 10 }, (_, i) => event(i, [[`t${i}`, "real"]]));
+    const byToken = new Map(events.map((_, i) => [`t${i}`, liquidBook()]));
+    const r = filterLiquidMarkets(events, byToken, { cap: 3 });
+    assert.equal(r.events.length, 3);
+    assert.equal(r.stats.liquid, 10);
+    assert.equal(r.stats.used, 3);
+  });
+
+  it("preserves upstream order (first N pass)", () => {
+    const events = [event("a", [["tA", "real"]]), event("b", [["tB", "real"]]), event("c", [["tC", "real"]])];
+    const byToken = new Map([["tA", liquidBook()], ["tB", liquidBook()], ["tC", liquidBook()]]);
+    const r = filterLiquidMarkets(events, byToken, { cap: 2 });
+    assert.deepEqual(r.events.map(e => e.id), ["a", "b"]);
+  });
+
+  it("handles malformed input safely", () => {
+    assert.equal(filterLiquidMarkets(null, new Map()).events.length, 0);
+    assert.equal(filterLiquidMarkets([], null).events.length, 0);
+    assert.equal(filterLiquidMarkets([{ markets: null }], new Map()).events.length, 0);
+  });
+});

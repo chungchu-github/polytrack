@@ -94,7 +94,9 @@ export async function captureMarketSnapshot(events = []) {
   if (inserted > 0 || failed > 0) {
     log.db(`Market snapshot: ${inserted} inserted, ${failed} failed (1 batch for ${jobs.length} tokens)`);
   }
-  return { inserted, failed };
+  // Return byToken so the scan loop can pre-filter strategies' market set
+  // by current orderbook liquidity (PR liquid-filter).
+  return { inserted, failed, byToken };
 }
 
 /**
