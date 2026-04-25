@@ -183,4 +183,58 @@ describe("StrategyEngine", () => {
     eng.unmarkTraded("momentum", "c1", "YES");
     assert.ok(!eng.isTraded("momentum", "c1", "YES"));
   });
+
+  // ── P0 #3 — cross-strategy conflict guard ─────────────────────────────────
+  describe("hasOpposingTrade", () => {
+    it("returns null when nothing has been traded", () => {
+      const eng = new StrategyEngine();
+      assert.equal(eng.hasOpposingTrade("c1", "YES"), null);
+    });
+
+    it("returns the opposing trade when a different strategy already went the other way", () => {
+      const eng = new StrategyEngine();
+      eng.markTraded("momentum", "c1", "YES");
+      const opp = eng.hasOpposingTrade("c1", "NO");
+      assert.ok(opp);
+      assert.equal(opp.strategy,  "momentum");
+      assert.equal(opp.direction, "YES");
+    });
+
+    it("returns null for same direction (not a conflict — same-direction is handled by isTraded)", () => {
+      const eng = new StrategyEngine();
+      eng.markTraded("momentum", "c1", "YES");
+      assert.equal(eng.hasOpposingTrade("c1", "YES"), null);
+    });
+
+    it("returns null for a different market entirely", () => {
+      const eng = new StrategyEngine();
+      eng.markTraded("momentum", "c1", "YES");
+      assert.equal(eng.hasOpposingTrade("c2", "NO"), null);
+    });
+
+    it("ignores after unmarkTraded", () => {
+      const eng = new StrategyEngine();
+      eng.markTraded("momentum", "c1", "YES");
+      eng.unmarkTraded("momentum", "c1", "YES");
+      assert.equal(eng.hasOpposingTrade("c1", "NO"), null);
+    });
+
+    it("works when the prior trade came from a different strategy", () => {
+      const eng = new StrategyEngine();
+      eng.markTraded("consensus", "c1", "YES");
+      const opp = eng.hasOpposingTrade("c1", "NO");
+      assert.equal(opp.strategy,  "consensus");
+      assert.equal(opp.direction, "YES");
+    });
+  });
+
+  describe("hasAnyTrade", () => {
+    it("matches across strategies and directions", () => {
+      const eng = new StrategyEngine();
+      assert.equal(eng.hasAnyTrade("c1"), false);
+      eng.markTraded("meanrev", "c1", "NO");
+      assert.equal(eng.hasAnyTrade("c1"), true);
+      assert.equal(eng.hasAnyTrade("c2"), false);
+    });
+  });
 });
