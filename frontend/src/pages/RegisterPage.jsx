@@ -44,6 +44,8 @@ export default function RegisterPage() {
         return;
       }
       setToken(body.token);
+      // navigate to dashboard — useQuery on the dashboard will fetch fresh
+      // with the new token. No prior queries to reset (we were on /register).
       navigate("/", { replace: true });
     } catch (e) {
       setError(`Network error: ${e.message}`);

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { api } from "../api/client.js";
 import clsx from "clsx";
 
@@ -34,10 +35,17 @@ export default function SignalDetailModal({ signal, onClose }) {
       setResult(data);
       setStage("status");
       qc.invalidateQueries({ queryKey: ["trades"] });
+      const msg = data?.status === "FILLED"
+        ? "Trade filled"
+        : data?.status === "PARTIAL"
+          ? "Trade partially filled"
+          : "Trade submitted";
+      toast.success(msg);
     },
     onError: (err) => {
       setResult({ status: "ERROR", error: err.message });
       setStage("status");
+      toast.error(err.message || "Trade failed");
     },
   });
 

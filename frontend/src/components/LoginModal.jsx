@@ -48,11 +48,16 @@ export default function LoginModal() {
         return;
       }
       setToken(body.token);
+
+      // Cancel any in-flight 401 retries that started before we had the token,
+      // then drop their cached error state. Without this we hit a race where
+      // the first login looked successful but background queries kept their
+      // stale "Unauthorized" rejections — user had to log in twice.
+      await qc.cancelQueries();
+      qc.removeQueries();
+
       setOpen(false);
       setU(""); setP(""); setBusy(false);
-      // resetQueries() (vs invalidateQueries) clears prior 401 error state too,
-      // so the dashboard refetches cleanly without the race we hit pre-Phase 1.
-      qc.resetQueries();
     } catch (e) {
       setError(`Network error: ${e.message}`);
       setBusy(false);
