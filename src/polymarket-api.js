@@ -191,6 +191,59 @@ export function normaliseMarket(m = {}) {
  * `normaliseMarket` rebuilds the synthetic `tokens: [{token_id, outcome, price}]`
  * shape so downstream consumers don't know Gamma changed.
  */
+/**
+ * Fetch raw market metadata for a list of conditionIds. Used by the scan
+ * loop to discover markets that tracked wallets are positioned in (which
+ * is what consensus actually trades on), separate from the broad
+ * top-100-by-volume sweep that's mostly post-resolution noise.
+ *
+ * Why this exists: live VPS data (2026-04-26) showed `/events?order=volume_24hr`
+ * returns 100% sentinel-orderbook events — long-tail post-resolution markets
+ * that accumulated volume historically. Tracked-wallet positions, by contrast,
+ * are markets ELITE wallets actively chose, so they're more likely to have
+ * tradeable books. Ground-truthed: 14 wallets → ~1900 unique conditionIds vs
+ * the broad source's 100 → 0 liquid.
+ *
+ * Returns an event-shaped array — same structure as fetchMarkets so the rest
+ * of the pipeline (capture / filter / strategies) needs no changes. We
+ * synthesize one event per market (no real "event" parent for arbitrary
+ * markets), title falling back to the market question.
+ *
+ * Chunks at `batchSize` cids per request — Gamma's URL length cap means
+ * cramming 200+ ids into one request silently truncates.
+ */
+export async function fetchMarketsByConditionIds(conditionIds, { batchSize = 50 } = {}) {
+  const cids = [...new Set((conditionIds || []).filter(Boolean).map(String))];
+  if (cids.length === 0) return [];
+
+  const out = [];
+  for (let i = 0; i < cids.length; i += batchSize) {
+    const chunk = cids.slice(i, i + batchSize);
+    // Repeated query param (verified against live API): condition_ids=A&condition_ids=B.
+    const qs = chunk.map(c => `condition_ids=${encodeURIComponent(c)}`).join("&");
+    let markets;
+    try {
+      markets = await apiFetch(`${GAMMA_API}/markets?${qs}&limit=${chunk.length}`);
+    } catch {
+      // One bad chunk shouldn't kill the whole discovery — skip and continue.
+      continue;
+    }
+    if (!Array.isArray(markets)) continue;
+    for (const m of markets) {
+      if (!m?.conditionId) continue;
+      const norm = normaliseMarket(m);
+      out.push({
+        id:     m.id,
+        slug:   m.slug || `cid-${String(m.conditionId).slice(0, 10)}`,
+        title:  m.question || "",
+        volume: Number(m.volume || m.volumeNum || 0) || null,
+        markets: [norm],
+      });
+    }
+  }
+  return out;
+}
+
 // Default bumped from 20 → 100 (PR liquid-filter): event-level volume_24hr
 // rank doesn't predict whether outcome tokens have real orderbooks today,
 // so we over-fetch and let filterLiquidMarkets drop the placeholder events.

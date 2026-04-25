@@ -19,7 +19,7 @@ import rateLimit from "express-rate-limit";
 import pinoHttp from "pino-http";
 
 import {
-  fetchMarkets, fetchWalletTrades, fetchWalletPositions,
+  fetchMarkets, fetchMarketsByConditionIds, fetchWalletTrades, fetchWalletPositions,
   fetchLeaderboard, proxyFetch, cancelOrder, fetchMidPrice, fetchOrderBook,
   submitOrder, fetchOrderStatus, CLOB_WS,
 } from "./polymarket-api.js";
@@ -314,6 +314,60 @@ async function loadWallet(addr) {
   };
 }
 
+/**
+ * Collect unique conditionIds from currently-tracked wallets' positions.
+ * Returns the top `cap` cids ordered by max position size in any wallet —
+ * we'd rather capture the markets where ELITE put real money than the
+ * tail of dust positions.
+ *
+ * Pure: depends only on state.wallets (already hydrated).
+ */
+function collectTrackedConditionIds(state, { cap = 200 } = {}) {
+  // Map cid → max position USD across any tracked wallet
+  const maxSizeByCid = new Map();
+  for (const w of state.wallets.values()) {
+    for (const p of w.positions || []) {
+      const cid = p.conditionId;
+      if (!cid) continue;
+      const size = Number(p.currentValue || p.size || 0);
+      const prev = maxSizeByCid.get(cid) || 0;
+      if (size > prev) maxSizeByCid.set(cid, size);
+    }
+  }
+  // Sort by max size desc, take top `cap`. Stable for equal sizes.
+  return [...maxSizeByCid.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, cap)
+    .map(([cid]) => cid);
+}
+
+/**
+ * Merge two market source lists, deduplicating by inner conditionId.
+ * Tracked-source wins on duplicates — its metadata is more relevant for
+ * consensus signal generation. Each input is event-shaped (events with
+ * .markets[].conditionId).
+ *
+ * Pure for testability.
+ */
+function mergeMarketSourcesByCid(primary, secondary) {
+  const seen = new Set();
+  const out = [];
+  for (const list of [primary, secondary]) {
+    for (const evt of list || []) {
+      // For our synthetic single-market events from fetchMarketsByConditionIds,
+      // there's exactly one m. fetchMarkets events can have multiple — keep
+      // the whole event if any inner cid is fresh.
+      const cids = (evt.markets || []).map(m => m?.conditionId).filter(Boolean);
+      if (cids.length === 0) continue;
+      const allSeen = cids.every(cid => seen.has(cid));
+      if (allSeen) continue;
+      for (const cid of cids) seen.add(cid);
+      out.push(evt);
+    }
+  }
+  return out;
+}
+
 // ── Main Scan Loop ───────────────────────────────────────────────────────────
 async function runScan() {
   if (state.scanning) {
@@ -330,13 +384,38 @@ async function runScan() {
   emit("scan:start", {});
 
   try {
-    // 1. Fetch markets — over-fetch to top 100 by 24h volume, then filter
-    //    by real orderbook liquidity. event-level volume_24hr is a poor
-    //    proxy for "outcome tokens have a tradeable book RIGHT NOW" —
-    //    Polymarket returns sentinel pricing (0.01/0.99) for dead outcomes,
-    //    which previously fed every strategy phantom signals (PR #20/#21).
-    const fetched = await fetchMarkets({ limit: 100 });
-    log.scan(`Fetched ${fetched.length} events; capturing orderbooks…`);
+    // 1. Two market sources merged before capture+filter:
+    //    a) Top 100 by 24h volume (broad sweep — mostly post-resolution
+    //       sentinel-orderbook events, but cheap to keep around for
+    //       discovery)
+    //    b) Tracked-wallet positions (PRECISE — markets ELITE wallets
+    //       chose, more likely to have tradeable books). Live VPS proved
+    //       (a) alone gives 0 liquid markets; (b) is what consensus
+    //       actually trades on anyway.
+    //    Use last-scan's wallet positions (state.wallets is populated
+    //    from DB hydration / previous scan), so a freshly-tracked wallet
+    //    contributes one scan later — acceptable tradeoff vs reordering
+    //    the loop.
+    const trackedCids = collectTrackedConditionIds(state, { cap: 200 });
+    const [fromVolume, fromTracked] = await Promise.all([
+      fetchMarkets({ limit: 100 }).catch(e => {
+        log.warn(`fetchMarkets (volume sweep) failed: ${e.message}`);
+        return [];
+      }),
+      trackedCids.length > 0
+        ? fetchMarketsByConditionIds(trackedCids).catch(e => {
+            log.warn(`fetchMarketsByConditionIds failed: ${e.message}`);
+            return [];
+          })
+        : Promise.resolve([]),
+    ]);
+    // Dedup by conditionId — the same market can appear in both lists.
+    // Tracked-wallet entry wins (richer / more relevant metadata).
+    const fetched = mergeMarketSourcesByCid(fromTracked, fromVolume);
+    log.scan(
+      `Markets fetched: ${fromTracked.length} from tracked wallets + ` +
+      `${fromVolume.length} from volume sweep → ${fetched.length} unique; capturing orderbooks…`
+    );
 
     // 2. Capture snapshots NOW (was step 7) — gives us fresh orderbook data
     //    to filter on before strategies run. Same code, just reordered.
@@ -360,7 +439,12 @@ async function runScan() {
     //    so momentum/meanrev/arbitrage all see the same actionable subset.
     const filtered = filterLiquidMarkets(fetched, capByToken, { cap: 30 });
     state.markets = filtered.events;
-    state.lastMarketFilter = filtered.stats;
+    state.lastMarketFilter = {
+      ...filtered.stats,
+      fromVolumeSource:  fromVolume.length,
+      fromTrackedSource: fromTracked.length,
+      trackedCidsConsidered: trackedCids.length,
+    };
     log.scan(
       `Markets: ${filtered.stats.fetched} fetched → ${filtered.stats.liquid} liquid → ` +
       `${filtered.stats.used} used (${filtered.stats.dropped} sentinels dropped)`
