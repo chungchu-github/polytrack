@@ -582,17 +582,21 @@ function AutoImportCard({ value, lastRun, saving, onSave }) {
       const lb = result.sources?.leaderboard;
       const at = result.sources?.activeTrader;
       const ex = result.excluded;
+      const rj = result.rejected?.length || 0;
+      const ev = result.evaluated || 0;
+
       const desc = [
         lb && `leaderboard ${lb.passedFilter}/${lb.fetched}`,
         at && `active-traders ${at.fetched}`,
+        `evaluated ${ev}, rejected ${rj}`,
         ex && `(${ex.alreadyTracked} tracked, ${ex.blacklisted} trash)`,
       ].filter(Boolean).join(" · ");
 
       if (result.added?.length > 0) {
         toast.success(`Added ${result.added.length} wallet(s)`, { description: desc });
       } else {
-        toast.message("No new candidates", {
-          description: desc + " — try lowering minPnl/minRoi or wait for the leaderboard to rotate.",
+        toast.message("No new candidates passed your filter", {
+          description: desc + " — try lowering minPnl/minRoi.",
         });
       }
     },
