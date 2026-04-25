@@ -15,6 +15,7 @@
  * spread (ask−bid ≤ maxSpread) before computing the edge.
  */
 import { BaseStrategy } from "./base.js";
+import { isSentinelSnap } from "./util.js";
 
 export class ArbitrageStrategy extends BaseStrategy {
   defaults() {
@@ -31,16 +32,7 @@ export class ArbitrageStrategy extends BaseStrategy {
 
   /** Snapshot has real, tradeable liquidity (not Polymarket's placeholder)? */
   static hasRealLiquidity(snap, { minLiquidBid, maxSpread }) {
-    if (!snap) return false;
-    // null/undefined check before Number() — Number(null)=0 silently passes
-    // the isFinite gate otherwise, defeating the spread/sentinel guard.
-    if (snap.best_bid == null || snap.best_ask == null) return false;
-    const bid = Number(snap.best_bid);
-    const ask = Number(snap.best_ask);
-    if (!Number.isFinite(bid) || bid <= minLiquidBid) return false;
-    if (!Number.isFinite(ask) || ask >= 1 - minLiquidBid) return false;
-    if (ask - bid > maxSpread) return false;
-    return true;
+    return !isSentinelSnap(snap, { minLiquidBid, maxSpread });
   }
 
   detect({ markets, history, now = Date.now() }) {

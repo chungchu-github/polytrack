@@ -7,6 +7,7 @@
  *   z < -threshold → current price is "too low"  → signal YES (revert up)
  */
 import { BaseStrategy } from "./base.js";
+import { isSentinelSnap } from "./util.js";
 
 export class MeanRevStrategy extends BaseStrategy {
   defaults() {
@@ -31,8 +32,11 @@ export class MeanRevStrategy extends BaseStrategy {
         if (snaps.length < cfg.minSamples) continue;
 
         const tokenId = snaps[0].token_id;
+        // Sentinel snapshots have mid stuck at 0.5; mixed in with one real
+        // observation they collapse the rolling std and yield massive
+        // false z-scores. Filter them out before computing mean/variance.
         const series = snaps
-          .filter(s => s.token_id === tokenId && s.mid_price != null)
+          .filter(s => s.token_id === tokenId && s.mid_price != null && !isSentinelSnap(s))
           .map(s => s.mid_price);
         if (series.length < cfg.minSamples) continue;
 
