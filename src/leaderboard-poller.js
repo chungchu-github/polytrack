@@ -16,7 +16,12 @@
  * server.js and the manual /import/run endpoint.
  */
 import { fetchLeaderboardRaw, fetchActiveTraders } from "./polymarket-api.js";
-import { getBlacklistedWallets } from "./db.js";
+import {
+  getBlacklistedWallets,
+  getRecentImportRejections,
+  recordImportRejection,
+  clearStaleImportRejections,
+} from "./db.js";
 
 /**
  * Same wallet can show in alltime + monthly + weekly with different
@@ -163,6 +168,9 @@ export async function pollAndImport(state, opts) {
     // run. Each loadWallet = ~2 Polymarket calls, so 50 ≈ 100 API calls in
     // the worst case where the filter rejects everything.
     maxEvaluatePerRun = 50,
+    // Skip candidates we already rejected within this window (default 7d).
+    // Set to 0 to disable the cache (every candidate gets re-evaluated).
+    rejectedTtlHours = 168,
     loadWallet,
     setWallet,
     log = console,
@@ -209,7 +217,11 @@ export async function pollAndImport(state, opts) {
 
   const trackedAddrs    = new Set(Array.from(state.wallets.keys()).map(a => a.toLowerCase()));
   const blacklistAddrs  = new Set(getBlacklistedWallets().map(w => w.address.toLowerCase()));
-  const excluded        = new Set([...trackedAddrs, ...blacklistAddrs]);
+  // Recently-rejected cache — addresses that failed walletPassesFilter
+  // within rejectedTtlHours. Skipped before loadWallet to save API calls.
+  const ttlMs           = Math.max(0, rejectedTtlHours) * 3600_000;
+  const rejectedCache   = ttlMs > 0 ? getRecentImportRejections(ttlMs) : new Set();
+  const excluded        = new Set([...trackedAddrs, ...blacklistAddrs, ...rejectedCache]);
   // Don't slice yet — we may need to keep evaluating past the first N.
   const fresh = dedupeAgainstKnown(combined, excluded);
 
@@ -248,6 +260,9 @@ export async function pollAndImport(state, opts) {
     const verdict = walletPassesFilter(wallet, { minPnl, minRoi });
     if (!verdict.pass) {
       rejected.push({ addr: c.proxyWallet, reason: verdict.reason });
+      // Persist so the next run can skip this address before loadWallet.
+      try { recordImportRejection(c.proxyWallet, verdict.reason); }
+      catch (e) { log.warn?.(`pollAndImport: recordImportRejection failed — ${e.message}`); }
       continue;
     }
 
@@ -255,8 +270,14 @@ export async function pollAndImport(state, opts) {
     added.push(c.proxyWallet);
   }
 
-  const trackedHits   = combined.filter(c => trackedAddrs.has(c.proxyWallet)).length;
-  const blacklistHits = combined.filter(c => blacklistAddrs.has(c.proxyWallet)).length;
+  const trackedHits      = combined.filter(c => trackedAddrs.has(c.proxyWallet)).length;
+  const blacklistHits    = combined.filter(c => blacklistAddrs.has(c.proxyWallet)).length;
+  const recentlyRejected = combined.filter(c => rejectedCache.has(c.proxyWallet)).length;
+
+  // Opportunistic GC — bound at 4× the active TTL so the table doesn't grow.
+  if (ttlMs > 0) {
+    try { clearStaleImportRejections(ttlMs * 4); } catch { /* ignore */ }
+  }
 
   return {
     added,
@@ -269,8 +290,9 @@ export async function pollAndImport(state, opts) {
       activeTrader: { fetched: activeRows.length },
     },
     excluded: {
-      alreadyTracked: trackedHits,
-      blacklisted:    blacklistHits,
+      alreadyTracked:    trackedHits,
+      blacklisted:       blacklistHits,
+      recentlyRejected,
     },
   };
 }

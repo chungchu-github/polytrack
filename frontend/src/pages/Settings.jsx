@@ -589,7 +589,7 @@ function AutoImportCard({ value, lastRun, saving, onSave }) {
         lb && `leaderboard ${lb.passedFilter}/${lb.fetched}`,
         at && `active-traders ${at.fetched}`,
         `evaluated ${ev}, rejected ${rj}`,
-        ex && `(${ex.alreadyTracked} tracked, ${ex.blacklisted} trash)`,
+        ex && `(${ex.alreadyTracked} tracked, ${ex.blacklisted} trash, ${ex.recentlyRejected || 0} cached-rejects)`,
       ].filter(Boolean).join(" · ");
 
       if (result.added?.length > 0) {

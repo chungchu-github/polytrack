@@ -37,6 +37,7 @@ export function initDB(dbPath) {
   migrateV8();
   migrateV9();
   migrateV10();
+  migrateV11();
   return db;
 }
 
@@ -298,6 +299,25 @@ function migrateV8() {
       FOREIGN KEY (used_by)    REFERENCES users(id)
     );
     CREATE INDEX IF NOT EXISTS idx_invitations_used ON invitations(used_by, expires_at);
+  `);
+}
+
+// ── Schema Migration v11 — auto-import rejection cache ─────────────────────
+// pollAndImport's load-then-filter loop loadWallet's every fresh candidate
+// every run, even ones we already rejected. With ~400-550 active-trader
+// candidates per run and most being losers, that's ~1000 wasted Polymarket
+// API calls per week. This table records "we tried this address, it failed
+// our PnL/ROI gate at TS" so the next run can skip it for some TTL (default
+// 7 days — long enough to amortise cost, short enough that a wallet that
+// actually turns around gets re-evaluated).
+function migrateV11() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS import_rejections (
+      address     TEXT PRIMARY KEY,
+      rejected_at INTEGER NOT NULL,
+      reason      TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_import_rejections_ts ON import_rejections(rejected_at);
   `);
 }
 
@@ -712,6 +732,43 @@ export function getBlacklistedWallets() {
      WHERE blacklisted = 1
      ORDER BY last_scored DESC
   `).all();
+}
+
+// ── Auto-import Rejection Cache ─────────────────────────────────────────────
+// Lightweight TTL set: pollAndImport writes here after walletPassesFilter
+// rejects a candidate, then queries here on the next run to skip the
+// loadWallet API call. See migrateV11 for rationale.
+
+/** Upsert — last rejection wins. Address stored lowercase for set-membership. */
+export function recordImportRejection(addr, reason) {
+  if (!addr) return 0;
+  return db.prepare(`
+    INSERT INTO import_rejections (address, rejected_at, reason)
+    VALUES (?, ?, ?)
+    ON CONFLICT(address) DO UPDATE SET
+      rejected_at = excluded.rejected_at,
+      reason      = excluded.reason
+  `).run(String(addr).toLowerCase(), Date.now(), reason || null).changes;
+}
+
+/**
+ * Returns a Set of lowercased addresses rejected within the last `ttlMs`.
+ * Caller does set membership: `if (cache.has(addr.toLowerCase())) skip`.
+ */
+export function getRecentImportRejections(ttlMs) {
+  if (!Number.isFinite(ttlMs) || ttlMs <= 0) return new Set();
+  const cutoff = Date.now() - ttlMs;
+  const rows = db.prepare(
+    "SELECT address FROM import_rejections WHERE rejected_at >= ?"
+  ).all(cutoff);
+  return new Set(rows.map(r => r.address));
+}
+
+/** Housekeeping — drop stale rows so the table doesn't grow forever. */
+export function clearStaleImportRejections(ttlMs) {
+  if (!Number.isFinite(ttlMs) || ttlMs <= 0) return 0;
+  const cutoff = Date.now() - ttlMs;
+  return db.prepare("DELETE FROM import_rejections WHERE rejected_at < ?").run(cutoff).changes;
 }
 
 // ── Signal Queries ───────────────────────────────────────────────────────────

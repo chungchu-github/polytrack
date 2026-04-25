@@ -15,6 +15,7 @@ import {
   getTradesPnlByStrategy, getWalletDegradationCandidates,
   vacuumDB,
   blacklistWallet, unblacklistWallet, getBlacklistedWallets,
+  recordImportRejection, getRecentImportRejections, clearStaleImportRejections,
 } from "../src/db.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -528,3 +529,70 @@ describe("wallet blacklist", () => {
     assert.equal(changed, 0);
   });
 });
+
+// ── Auto-import rejection cache (V11) ────────────────────────────────────────
+
+describe("import_rejections cache", () => {
+  const A = "0xCAFE000000000000000000000000000000000001"; // upper-cased on input
+  const B = "0xcafe000000000000000000000000000000000002";
+  const HOUR = 3600_000;
+
+  before(() => {
+    getDB().exec("DELETE FROM import_rejections");
+  });
+
+  it("records a rejection (lowercased) and finds it within TTL", () => {
+    const changes = recordImportRejection(A, "pnl 50 < 100");
+    assert.equal(changes, 1);
+
+    const set = getRecentImportRejections(24 * HOUR);
+    assert.equal(set.has(A.toLowerCase()), true);
+    assert.equal(set.has(A), false, "stored lowercase, not as-input");
+  });
+
+  it("upserts on conflict (last reason wins)", () => {
+    recordImportRejection(A, "first");
+    const changes = recordImportRejection(A, "second");
+    assert.equal(changes, 1);
+    const row = getDB().prepare(
+      "SELECT reason FROM import_rejections WHERE address = ?"
+    ).get(A.toLowerCase());
+    assert.equal(row.reason, "second");
+  });
+
+  it("excludes rows older than ttlMs", () => {
+    recordImportRejection(B, "stale");
+    // Backdate to 30 days ago
+    const STALE = Date.now() - 30 * 24 * HOUR;
+    getDB().prepare(
+      "UPDATE import_rejections SET rejected_at = ? WHERE address = ?"
+    ).run(STALE, B);
+
+    const set7d = getRecentImportRejections(7 * 24 * HOUR);
+    assert.equal(set7d.has(B), false);
+
+    const set60d = getRecentImportRejections(60 * 24 * HOUR);
+    assert.equal(set60d.has(B), true);
+  });
+
+  it("returns empty Set for ttlMs <= 0 or non-finite", () => {
+    assert.equal(getRecentImportRejections(0).size, 0);
+    assert.equal(getRecentImportRejections(-1).size, 0);
+    assert.equal(getRecentImportRejections(NaN).size, 0);
+  });
+
+  it("clearStaleImportRejections drops only old rows", () => {
+    // A is fresh, B was backdated 30 days
+    const removed = clearStaleImportRejections(7 * 24 * HOUR);
+    assert.ok(removed >= 1, "should drop B");
+    const remaining = getRecentImportRejections(60 * 24 * HOUR);
+    assert.equal(remaining.has(A.toLowerCase()), true);
+    assert.equal(remaining.has(B), false);
+  });
+
+  it("recordImportRejection returns 0 for empty/falsy address", () => {
+    assert.equal(recordImportRejection("", "x"), 0);
+    assert.equal(recordImportRejection(null, "x"), 0);
+  });
+});
+
