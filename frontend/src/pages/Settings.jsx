@@ -575,12 +575,25 @@ function AutoImportCard({ value, lastRun, saving, onSave }) {
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ["wallets"] });
       queryClient.invalidateQueries({ queryKey: ["health"] });
+      if (result.skipped === true) {
+        toast.message("Auto-import skipped — throttled or disabled");
+        return;
+      }
+      const lb = result.sources?.leaderboard;
+      const at = result.sources?.activeTrader;
+      const ex = result.excluded;
+      const desc = [
+        lb && `leaderboard ${lb.passedFilter}/${lb.fetched}`,
+        at && `active-traders ${at.fetched}`,
+        ex && `(${ex.alreadyTracked} tracked, ${ex.blacklisted} trash)`,
+      ].filter(Boolean).join(" · ");
+
       if (result.added?.length > 0) {
-        toast.success(`Imported ${result.added.length} new wallet(s)`);
-      } else if (result.skipped) {
-        toast.message("Auto-import skipped (throttled or disabled)");
+        toast.success(`Added ${result.added.length} wallet(s)`, { description: desc });
       } else {
-        toast.message(`No new candidates (scanned ${result.scanned ?? 0})`);
+        toast.message("No new candidates", {
+          description: desc + " — try lowering minPnl/minRoi or wait for the leaderboard to rotate.",
+        });
       }
     },
     onError: (e) => toast.error(e.message || "Auto-import failed"),

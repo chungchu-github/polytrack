@@ -1,15 +1,21 @@
 /**
- * Leaderboard auto-import (PR B).
+ * Auto-import discovery pipeline.
  *
- * Pulls Polymarket leaderboard windows, merges + filters, and adds the top
- * unseen wallets to the watch list — all in-process, no HTTP layer.
+ * Two data sources, combined:
+ *   1. Polymarket leaderboard endpoint (capped at 20 unique addresses
+ *      regardless of category/time/sort — that ceiling is hardcoded by
+ *      Polymarket, not by us).
+ *   2. Per-market /trades endpoint walking the hottest markets — gives
+ *      hundreds of unique active traders. This is the source that lets
+ *      auto-import keep finding new candidates after the leaderboard's
+ *      20 are already tracked.
  *
- * Pure helpers (mergeRows, filterCandidates) are exported for unit testing.
- * The async pollAndImport orchestrates the full poll → filter → import
- * pipeline; it's called by both the cron in server.js and the manual
- * /import/run endpoint.
+ * Pure helpers (mergeRows, filterCandidates, dedupeAgainstKnown,
+ * mergeSources) are exported for unit testing. The async pollAndImport
+ * orchestrates poll → filter → import; called by both the cron in
+ * server.js and the manual /import/run endpoint.
  */
-import { fetchLeaderboardRaw } from "./polymarket-api.js";
+import { fetchLeaderboardRaw, fetchActiveTraders } from "./polymarket-api.js";
 import { getBlacklistedWallets } from "./db.js";
 
 /**
@@ -55,19 +61,74 @@ export function dedupeAgainstKnown(candidates, excluded) {
 }
 
 /**
+ * Combine leaderboard rows + active-trader rows into one candidate list.
+ *
+ * Leaderboard rows carry pnl / volume / roi (we know they pass minPnl/minRoi
+ * via filterCandidates). Active-trader rows only carry on-market trade
+ * activity — they don't have all-time PnL, so they're added with the
+ * optimistic assumption that lots of activity ≈ skill, and polytrack's
+ * own scoring will sort them after they're tracked.
+ *
+ * Leaderboard wins on duplicates (its data is richer). Returns a unified
+ * shape with `source: "leaderboard" | "active-trader"`.
+ */
+export function mergeSources(leaderboardRows, activeRows) {
+  const out = new Map();
+  for (const r of leaderboardRows || []) {
+    out.set(r.proxyWallet, {
+      proxyWallet:    r.proxyWallet,
+      pnl:            r.pnl,
+      volume:         r.volume,
+      roi:            r.roi,
+      pseudonym:      r.pseudonym,
+      source:         "leaderboard",
+    });
+  }
+  for (const r of activeRows || []) {
+    if (out.has(r.proxyWallet)) continue;       // leaderboard wins
+    out.set(r.proxyWallet, {
+      proxyWallet:    r.proxyWallet,
+      pnl:            null,
+      volume:         null,
+      roi:            null,
+      pseudonym:      null,
+      source:         "active-trader",
+      marketCount:    r.marketCount,
+      totalTradedUsd: r.totalTradedUsd,
+      lastTradeTs:    r.lastTradeTs,
+    });
+  }
+  return [...out.values()];
+}
+
+/**
  * Full auto-import pipeline.
  *
  * @param {object} state    runtime state (state.wallets is the live tracked map)
  * @param {object} opts
- * @param {string[]} opts.windows         leaderboard time windows to poll
+ * @param {string[]} opts.windows           leaderboard time windows to poll
  * @param {number}   opts.minPnl
  * @param {number}   opts.minRoi
- * @param {number}   opts.maxAddPerRun    cap so a single run can't flood
- * @param {function} opts.loadWallet      async (addr) => walletObj  (server.js's loadWallet)
- * @param {function} opts.setWallet       (state, walletObj) => void (server.js's setWallet)
+ * @param {number}   opts.maxAddPerRun      cap so a single run can't flood
+ * @param {number}   [opts.activeMarketLimit]    top N markets to walk (default 15)
+ * @param {number}   [opts.activeMinTradeUsd]    skip dust trades (default $50)
+ * @param {function} opts.loadWallet        async (addr) => walletObj
+ * @param {function} opts.setWallet         (state, walletObj) => void
  * @param {function} [opts.log]
  *
- * @returns {{ added: string[], skipped: number, failed: string[], scanned: number }}
+ * @returns {{
+ *   added:           string[],
+ *   failed:          string[],
+ *   skipped:         number,
+ *   sources: {
+ *     leaderboard:   { fetched: number, passedFilter: number },
+ *     activeTrader:  { fetched: number },
+ *   },
+ *   excluded: {
+ *     alreadyTracked: number,
+ *     blacklisted:    number,
+ *   },
+ * }}
  */
 export async function pollAndImport(state, opts) {
   const {
@@ -75,6 +136,8 @@ export async function pollAndImport(state, opts) {
     minPnl = 100_000,
     minRoi = 0.025,
     maxAddPerRun = 5,
+    activeMarketLimit = 15,
+    activeMinTradeUsd = 50,
     loadWallet,
     setWallet,
     log = console,
@@ -84,7 +147,7 @@ export async function pollAndImport(state, opts) {
     throw new Error("pollAndImport requires loadWallet + setWallet callbacks");
   }
 
-  // 1. Pull every window in parallel; tolerate per-window failures.
+  // ── Source 1: leaderboard (capped at 20 unique by upstream) ───────────────
   const settled = await Promise.allSettled(
     windows.map(w => fetchLeaderboardRaw({ time: w, sort: "profit" }).then(rows => [w, rows]))
   );
@@ -94,26 +157,37 @@ export async function pollAndImport(state, opts) {
       const [w, rows] = r.value;
       rowsByWindow[w] = rows;
     } else {
-      log.warn?.(`pollAndImport: window failed — ${r.reason?.message || r.reason}`);
+      log.warn?.(`pollAndImport: leaderboard window failed — ${r.reason?.message || r.reason}`);
     }
   }
-  if (Object.keys(rowsByWindow).length === 0) {
-    return { added: [], skipped: 0, failed: [], scanned: 0, error: "all windows failed" };
+  const leaderboardMerged = mergeRows(rowsByWindow);
+  const leaderboardPassed = filterCandidates(
+    leaderboardMerged,
+    { minPnl, minRoi, top: maxAddPerRun * 5 },
+  );
+
+  // ── Source 2: active traders walking hottest markets ──────────────────────
+  let activeRows = [];
+  try {
+    activeRows = await fetchActiveTraders({
+      marketLimit: activeMarketLimit,
+      perMarketLimit: 100,
+      minTradeUsd: activeMinTradeUsd,
+    });
+  } catch (e) {
+    log.warn?.(`pollAndImport: active-trader fetch failed — ${e.message}`);
   }
 
-  // 2. Merge + filter.
-  const merged = mergeRows(rowsByWindow);
-  const ranked = filterCandidates(merged, { minPnl, minRoi, top: maxAddPerRun * 5 });
+  // ── Combine, dedupe, cap ─────────────────────────────────────────────────
+  const combined = mergeSources(leaderboardPassed, activeRows);
 
-  // 3. Subtract anything we already know about (live or blacklisted).
-  const excluded = new Set([
-    ...Array.from(state.wallets.keys()),
-    ...getBlacklistedWallets().map(w => w.address),
-  ]);
-  const fresh = dedupeAgainstKnown(ranked, excluded).slice(0, maxAddPerRun);
+  const trackedAddrs    = new Set(Array.from(state.wallets.keys()).map(a => a.toLowerCase()));
+  const blacklistAddrs  = new Set(getBlacklistedWallets().map(w => w.address.toLowerCase()));
+  const excluded        = new Set([...trackedAddrs, ...blacklistAddrs]);
+  const fresh           = dedupeAgainstKnown(combined, excluded).slice(0, maxAddPerRun);
 
-  // 4. Load each new wallet through the same path manual /wallets POST uses.
-  const added = [];
+  // ── Load + persist ───────────────────────────────────────────────────────
+  const added  = [];
   const failed = [];
   for (const c of fresh) {
     try {
@@ -126,10 +200,20 @@ export async function pollAndImport(state, opts) {
     }
   }
 
+  const trackedHits   = combined.filter(c => trackedAddrs.has(c.proxyWallet)).length;
+  const blacklistHits = combined.filter(c => blacklistAddrs.has(c.proxyWallet)).length;
+
   return {
     added,
-    skipped: ranked.length - fresh.length,
     failed,
-    scanned: merged.length,
+    skipped: combined.length - fresh.length,
+    sources: {
+      leaderboard:  { fetched: leaderboardMerged.length, passedFilter: leaderboardPassed.length },
+      activeTrader: { fetched: activeRows.length },
+    },
+    excluded: {
+      alreadyTracked: trackedHits,
+      blacklisted:    blacklistHits,
+    },
   };
 }
