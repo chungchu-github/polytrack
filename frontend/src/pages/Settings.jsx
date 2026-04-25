@@ -177,6 +177,14 @@ export default function Settings() {
         onSave={(patch) => cfgMutation.mutate({ exitPolicy: patch })}
       />
 
+      {/* Auto-Import — PR B */}
+      <AutoImportCard
+        value={form.autoImport}
+        lastRun={health?.autoImport}
+        saving={cfgMutation.isPending}
+        onSave={(patch) => cfgMutation.mutate({ autoImport: patch })}
+      />
+
       {/* Auto-Copy */}
       <div className="card">
         <h2 className="card-header">Auto-Copy Trading</h2>
@@ -532,4 +540,149 @@ function ExitPolicyCard({ value, saving, onSave }) {
       </div>
     </div>
   );
+}
+
+/**
+ * AutoImportCard — toggles the leaderboard cron + tunes its filters.
+ *
+ * The cron checks every hour but only does work when intervalHours has
+ * elapsed since lastRunAt. Manual "Run now" bypasses the throttle.
+ */
+function AutoImportCard({ value, lastRun, saving, onSave }) {
+  const cfg = value || { enabled: false, intervalHours: 168, minPnl: 100000, minRoi: 0.025, maxAddPerRun: 5 };
+  const [interval,    setInterval]   = useState(cfg.intervalHours);
+  const [minPnlK,     setMinPnlK]    = useState(Math.round((cfg.minPnl || 0) / 1000));
+  const [minRoiPct,   setMinRoiPct]  = useState(Math.round((cfg.minRoi || 0) * 1000) / 10);
+  const [maxAdd,      setMaxAdd]     = useState(cfg.maxAddPerRun);
+  const queryClient = useQueryClient();
+
+  useEffect(() => {
+    setInterval(cfg.intervalHours);
+    setMinPnlK(Math.round((cfg.minPnl || 0) / 1000));
+    setMinRoiPct(Math.round((cfg.minRoi || 0) * 1000) / 10);
+    setMaxAdd(cfg.maxAddPerRun);
+  }, [cfg.intervalHours, cfg.minPnl, cfg.minRoi, cfg.maxAddPerRun]);
+
+  const enabled = !!cfg.enabled;
+  const dirty   =
+    Number(interval)  !== Number(cfg.intervalHours) ||
+    Number(minPnlK)   !== Math.round((cfg.minPnl || 0) / 1000) ||
+    Math.abs(Number(minRoiPct) / 100 - Number(cfg.minRoi || 0)) > 1e-9 ||
+    Number(maxAdd)    !== Number(cfg.maxAddPerRun);
+
+  const runMut = useMutation({
+    mutationFn: () => api.runAutoImport(),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["wallets"] });
+      queryClient.invalidateQueries({ queryKey: ["health"] });
+      if (result.added?.length > 0) {
+        toast.success(`Imported ${result.added.length} new wallet(s)`);
+      } else if (result.skipped) {
+        toast.message("Auto-import skipped (throttled or disabled)");
+      } else {
+        toast.message(`No new candidates (scanned ${result.scanned ?? 0})`);
+      }
+    },
+    onError: (e) => toast.error(e.message || "Auto-import failed"),
+  });
+
+  const lastRunAt = lastRun?.lastRunAt;
+  const lastResult = lastRun?.lastResult;
+  const lastRunStr = lastRunAt
+    ? `${formatRelativeAgo(Date.now() - lastRunAt)} ago` +
+      (lastResult ? ` (added ${lastResult.added?.length ?? 0}, skipped ${lastResult.skipped ?? 0})` : "")
+    : "never";
+
+  return (
+    <div className="card">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="card-header !mb-1">Auto-Import Top Traders</h2>
+          <p className="text-2xs text-surface-500">
+            Periodically pulls Polymarket leaderboard and adds new high-ROI wallets to your watch list.
+            All thresholds applied; market-makers filtered out.
+          </p>
+        </div>
+        <button
+          onClick={() => onSave({ enabled: !enabled })}
+          disabled={saving}
+          className={clsx(
+            "relative inline-flex h-7 w-12 shrink-0 cursor-pointer items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-primary/30",
+            enabled ? "bg-primary" : "bg-surface-600"
+          )}
+          role="switch"
+          aria-checked={enabled}
+          aria-label="Toggle auto-import"
+        >
+          <span className={clsx(
+            "inline-block h-5 w-5 rounded-full bg-white shadow-sm transition-transform",
+            enabled ? "translate-x-6" : "translate-x-1"
+          )} />
+        </button>
+      </div>
+
+      <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <Field label="Interval (hours)" value={interval}    onChange={setInterval}   hint="168 = weekly" />
+        <Field label="Min PnL ($K)"     value={minPnlK}     onChange={setMinPnlK}    hint="100 = $100k" />
+        <Field label="Min ROI (%)"      value={minRoiPct}   onChange={setMinRoiPct}  hint="2.5 = 2.5%" />
+        <Field label="Max add per run"  value={maxAdd}      onChange={setMaxAdd}     hint="5 = safe" />
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-center gap-3">
+        <button
+          onClick={() => onSave({
+            intervalHours: Number(interval) || 168,
+            minPnl:        Math.round(Number(minPnlK) * 1000),
+            minRoi:        Math.max(0, Number(minRoiPct) / 100),
+            maxAddPerRun:  Number(maxAdd) || 5,
+          })}
+          disabled={!dirty || saving}
+          className="btn-primary"
+        >
+          {saving ? "Saving…" : "Save thresholds"}
+        </button>
+        <button
+          onClick={() => runMut.mutate()}
+          disabled={runMut.isPending}
+          className="px-3 py-1.5 rounded-md border border-surface-700 text-xs text-surface-200 hover:bg-surface-800 transition-colors disabled:opacity-50"
+        >
+          {runMut.isPending ? "Running…" : "Run now"}
+        </button>
+        <p className="text-2xs text-surface-600 ml-auto">
+          Last run: <span className="text-surface-400">{lastRunStr}</span>
+        </p>
+      </div>
+
+      {!enabled && (
+        <p className="text-2xs text-amber-400 mt-2">
+          Toggle currently OFF — cron won't fire. "Run now" still works (manual override).
+        </p>
+      )}
+    </div>
+  );
+}
+
+function Field({ label, value, onChange, hint }) {
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-2xs uppercase tracking-wider text-surface-400">{label}</span>
+      <input
+        type="number"
+        min="0"
+        step="any"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="rounded-md border border-surface-700 bg-surface-800 px-3 py-2 text-sm text-surface-200 tabular-nums focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/30"
+      />
+      {hint && <span className="text-2xs text-surface-600">{hint}</span>}
+    </label>
+  );
+}
+
+function formatRelativeAgo(ms) {
+  const sec = ms / 1000;
+  if (sec < 60)  return `${Math.round(sec)}s`;
+  if (sec < 3600) return `${Math.round(sec / 60)}m`;
+  if (sec < 86400) return `${Math.round(sec / 3600)}h`;
+  return `${Math.round(sec / 86400)}d`;
 }
