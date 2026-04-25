@@ -61,4 +61,35 @@ export class StrategyEngine {
   isTraded(strategy, cid, dir) {
     return this.traded.has(this._key(strategy, cid, dir));
   }
+
+  /**
+   * Cross-strategy conflict guard. Returns the existing opposite-direction
+   * trade (if any) so a caller can skip a new trade that would create a
+   * hedged long+short pair on the same binary market.
+   *
+   * Without this, momentum saying YES while meanrev says NO on the same
+   * market would burn spread + builder fee guaranteed — the two positions
+   * settle against each other regardless of where the market lands.
+   *
+   * @returns {{ strategy: string, direction: "YES" | "NO" } | null}
+   */
+  hasOpposingTrade(cid, dir) {
+    const opposite = dir === "YES" ? "NO" : "YES";
+    for (const key of this.traded) {
+      const [keyStrategy, keyCid, keyDir] = key.split("::");
+      if (keyCid === cid && keyDir === opposite) {
+        return { strategy: keyStrategy, direction: keyDir };
+      }
+    }
+    return null;
+  }
+
+  /** True if any strategy has traded this market in any direction. */
+  hasAnyTrade(cid) {
+    for (const key of this.traded) {
+      const [, keyCid] = key.split("::");
+      if (keyCid === cid) return true;
+    }
+    return false;
+  }
 }

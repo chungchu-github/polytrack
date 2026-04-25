@@ -386,6 +386,16 @@ async function runScan() {
         const minStrength = stratCfg.minStrength ?? cfg.minSignalStrength ?? 0;
         if (sig.strength < minStrength) continue;
 
+        // Cross-strategy conflict guard — block momentum YES + meanrev NO on
+        // the same market. Without this we'd burn spread + fee on a guaranteed
+        // self-hedged pair. Whoever marked the market first holds; the late
+        // opposite signal is dropped.
+        const opposing = state.strategyEngine.hasOpposingTrade(sig.conditionId, sig.direction);
+        if (opposing) {
+          log.warn(`Cross-strategy conflict — ${strategyName} ${sig.direction} blocked: ${opposing.strategy} already ${opposing.direction} on ${sig.conditionId.slice(0, 10)}…`);
+          continue;
+        }
+
         // Risk gate — daily loss / exposure / cooldown / V3 live-test cap
         const risk = checkRiskLimits(state, sig.conditionId, cfg.maxTradeUsdc, cfg);
         if (!risk.ok) {
