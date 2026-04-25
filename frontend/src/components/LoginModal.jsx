@@ -19,8 +19,17 @@ export default function LoginModal() {
   const [busy, setBusy]     = useState(false);
 
   useEffect(() => {
-    function onAuthRequired() {
-      setError("Session expired or invalid — please sign in again.");
+    function onAuthRequired(e) {
+      // Only flash the red error when the modal is reopening because a
+      // token was rejected mid-session. If the user just signed out (or
+      // any caller without a reason), no error message — the modal opens
+      // clean.
+      const reason = e?.detail?.reason;
+      if (reason === "session") {
+        setError("Session expired or invalid — please sign in again.");
+      } else {
+        setError("");
+      }
       setOpen(true);
     }
     window.addEventListener("polytrack:auth-required", onAuthRequired);
@@ -49,10 +58,12 @@ export default function LoginModal() {
       }
       setToken(body.token);
 
-      // Cancel any in-flight 401 retries that started before we had the token,
-      // then drop their cached error state. Without this we hit a race where
-      // the first login looked successful but background queries kept their
-      // stale "Unauthorized" rejections — user had to log in twice.
+      // Belt + suspenders against the "login twice" race. The primary fix
+      // lives in api/client.js (request() no longer dispatches
+      // auth-required for 401s on no-token requests, so background queries
+      // that flew off before login can't reopen us). cancelQueries kills
+      // anything still in-flight; removeQueries clears any queries that
+      // already resolved into error state with the old token.
       await qc.cancelQueries();
       qc.removeQueries();
 

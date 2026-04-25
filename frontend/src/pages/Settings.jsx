@@ -1,22 +1,23 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { api, setToken } from "../api/client.js";
+import { api, signOutAndPromptLogin } from "../api/client.js";
 import InviteManager from "../components/InviteManager.jsx";
 import clsx from "clsx";
 
 // SessionCard — replaces the old API_TOKEN field. Shows the logged-in user
-// and provides a logout button (clears the JWT and forces LoginModal to
-// re-prompt). Defined here so Settings.jsx stays self-contained.
+// and provides a logout button (clears the JWT and reopens LoginModal in
+// a clean state). Defined here so Settings.jsx stays self-contained.
 function SessionCard() {
+  const queryClient = useQueryClient();
   const { data, isLoading } = useQuery({ queryKey: ["me"], queryFn: api.me });
   const user = data?.user;
 
   function handleLogout() {
-    api.logout();              // best-effort, server is stateless
-    setToken("");              // wipe localStorage
+    api.logout();                 // best-effort, server is stateless
+    queryClient.removeQueries();  // drop cached user / wallets / etc.
+    signOutAndPromptLogin();      // wipes token + opens login modal cleanly
     toast.success("Signed out");
-    window.dispatchEvent(new CustomEvent("polytrack:auth-required"));
   }
 
   return (

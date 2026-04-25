@@ -39,10 +39,21 @@ async function request(path, opts = {}) {
   });
 
   if (res.status === 401) {
-    // Broadcast so a global Login modal can prompt for the token without
-    // every caller needing to import auth state. Page-level useQuery
-    // listeners ignore the event by default — they just see the throw.
-    window.dispatchEvent(new CustomEvent(AUTH_EVENT));
+    // Only broadcast "your session is invalid" if we actually attached a
+    // token. A 401 on a request that sent no token just means the user
+    // isn't logged in yet — the modal is already visible from initial
+    // mount, no need to flash an error.
+    //
+    // Critical: this also fixes the "login twice" race. Background queries
+    // started before the user typed their password fly off without a token,
+    // come back 401 *after* setToken/login completes, and used to reopen
+    // the freshly-closed modal. Suppressing the event when there was no
+    // token kills that race without needing AbortSignal plumbing.
+    if (token) {
+      window.dispatchEvent(new CustomEvent(AUTH_EVENT, {
+        detail: { reason: "session" },
+      }));
+    }
     throw new UnauthorizedError();
   }
 
@@ -51,6 +62,19 @@ async function request(path, opts = {}) {
     throw new Error(body.error || `HTTP ${res.status}`);
   }
   return res.json();
+}
+
+/**
+ * Programmatic logout — clears the token and tells the LoginModal to open
+ * with a clean (non-error) state. Use this instead of dispatching the
+ * auth-required event yourself, otherwise the modal flashes "Session
+ * expired" even though the user just clicked Sign out.
+ */
+export function signOutAndPromptLogin() {
+  setToken("");
+  window.dispatchEvent(new CustomEvent(AUTH_EVENT, {
+    detail: { reason: "logout" },
+  }));
 }
 
 export const api = {
