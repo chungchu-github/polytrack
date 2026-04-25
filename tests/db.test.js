@@ -13,6 +13,7 @@ import {
   insertMarketSnapshot, insertPositionSnapshot, getDataCaptureStats,
   insertWalletTier, getWalletTierAt,
   getTradesPnlByStrategy, getWalletDegradationCandidates,
+  vacuumDB,
 } from "../src/db.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -434,6 +435,40 @@ describe("getWalletDegradationCandidates", () => {
     db.exec("DELETE FROM positions_history;");
     const result = getWalletDegradationCandidates({ windowDays: 30 });
     assert.equal(result.length, 0);
+  });
+});
+
+// ── N3 — VACUUM ──────────────────────────────────────────────────────────────
+
+describe("vacuumDB", () => {
+  it("completes and returns sensible byte/duration metrics", () => {
+    // Seed + delete churn so there's something to reclaim
+    const db = getDB();
+    db.exec("DELETE FROM market_snapshots;");
+    for (let i = 0; i < 200; i++) {
+      insertMarketSnapshot({
+        conditionId: "cvac",
+        tokenId: `t${i}`,
+        timestamp: 1000 + i,
+        midPrice: 0.5, bestBid: 0.49, bestAsk: 0.51,
+        bidDepth: 100, askDepth: 100, volume24h: 1000,
+      });
+    }
+    db.exec("DELETE FROM market_snapshots WHERE condition_id = 'cvac';");
+
+    const r = vacuumDB();
+    assert.ok(r.bytesBefore > 0,      "bytesBefore positive");
+    assert.ok(r.bytesAfter  > 0,      "bytesAfter positive");
+    assert.ok(r.durationMs  >= 0,     "durationMs non-negative");
+    assert.equal(typeof r.freedBytes, "number", "freedBytes is a number");
+  });
+
+  it("leaves the DB usable for subsequent queries", () => {
+    insertMarketSnapshot({
+      conditionId: "cafter", tokenId: "tA", timestamp: 9999, midPrice: 0.5,
+    });
+    const stats = getDataCaptureStats();
+    assert.ok(stats.marketSnapshots.total >= 1, "can read after VACUUM");
   });
 });
 

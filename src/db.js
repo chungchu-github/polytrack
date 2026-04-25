@@ -8,7 +8,7 @@
 import Database from "better-sqlite3";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
-import { mkdirSync } from "fs";
+import { mkdirSync, statSync } from "fs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = resolve(__dirname, "..", "data");
@@ -371,6 +371,34 @@ export function deleteOldMarketSnapshots(cutoffMs) {
 
 export function deleteOldPositionHistory(cutoffMs) {
   return db.prepare("DELETE FROM positions_history WHERE snapshot_at < ?").run(cutoffMs).changes;
+}
+
+/**
+ * Reclaim disk space by rebuilding the database file. SQLite's DELETE marks
+ * pages as free but doesn't shrink the file — over months of daily pruning,
+ * the file can grow several-fold past the live data size. VACUUM rewrites
+ * the whole DB into a fresh file, which also defragments B-tree pages.
+ *
+ * Caveats:
+ * - Briefly locks the DB for writes while it runs.
+ * - Requires roughly 2× the DB size in free disk space during execution.
+ * - Safe under WAL mode (SQLite handles the mode switch internally).
+ *
+ * @returns {{ bytesBefore: number, bytesAfter: number, freedBytes: number, durationMs: number }}
+ */
+export function vacuumDB() {
+  const dbPath = db.name;
+  const bytesBefore = statSync(dbPath).size;
+  const t0 = Date.now();
+  db.exec("VACUUM");
+  const durationMs = Date.now() - t0;
+  const bytesAfter = statSync(dbPath).size;
+  return {
+    bytesBefore,
+    bytesAfter,
+    freedBytes: bytesBefore - bytesAfter,
+    durationMs,
+  };
 }
 
 /**
