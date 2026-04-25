@@ -43,12 +43,13 @@ const DEFAULTS = {
   // opts in via Settings UI. Conservative thresholds so a single run can't
   // flood the watch list with marginal candidates.
   autoImport: {
-    enabled:       false,
-    intervalHours: 168,             // weekly
-    minPnl:        100_000,         // $100k absolute
-    minRoi:        0.025,           // 2.5%
-    maxAddPerRun:  5,
-    windows:       ["alltime", "monthly", "weekly"],
+    enabled:          false,
+    intervalHours:    168,             // weekly
+    minPnl:           100_000,         // $100k absolute
+    minRoi:           0.025,           // 2.5%
+    maxAddPerRun:     5,
+    rejectedTtlHours: 168,             // skip re-eval of rejected addrs for 7d
+    windows:          ["alltime", "monthly", "weekly"],
   },
 };
 
@@ -106,7 +107,7 @@ function mergeAutoImport(existing, patch) {
   const base = existing || DEFAULTS.autoImport;
   const out = { ...base };
   if (typeof patch.enabled === "boolean") out.enabled = patch.enabled;
-  for (const numKey of ["intervalHours", "minPnl", "minRoi", "maxAddPerRun"]) {
+  for (const numKey of ["intervalHours", "minPnl", "minRoi", "maxAddPerRun", "rejectedTtlHours"]) {
     if (Number.isFinite(Number(patch[numKey])) && Number(patch[numKey]) >= 0) {
       out[numKey] = Number(patch[numKey]);
     }

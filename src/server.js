@@ -1318,10 +1318,11 @@ async function runAutoImport({ manual = false } = {}) {
 
   log.info(`Auto-import: starting (windows=${ai.windows.join(",")}, minPnl=${ai.minPnl}, minRoi=${ai.minRoi})…`);
   const result = await pollAndImport(state, {
-    windows:       ai.windows,
-    minPnl:        ai.minPnl,
-    minRoi:        ai.minRoi,
-    maxAddPerRun:  ai.maxAddPerRun,
+    windows:          ai.windows,
+    minPnl:           ai.minPnl,
+    minRoi:           ai.minRoi,
+    maxAddPerRun:     ai.maxAddPerRun,
+    rejectedTtlHours: ai.rejectedTtlHours,
     loadWallet,
     setWallet,
     log,
