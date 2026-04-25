@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate } from "react-router-dom";
+import { Routes, Route, Navigate, useLocation } from "react-router-dom";
 import Layout from "./components/Layout.jsx";
 import LoginModal from "./components/LoginModal.jsx";
 import Dashboard from "./pages/Dashboard.jsx";
@@ -9,12 +9,18 @@ import Trades from "./pages/Trades.jsx";
 import Risk from "./pages/Risk.jsx";
 import Backtest from "./pages/Backtest.jsx";
 import Settings from "./pages/Settings.jsx";
+import RegisterPage from "./pages/RegisterPage.jsx";
 
 export default function App() {
+  // /register is the only route that should render WITHOUT triggering the
+  // login modal — invitees haven't signed in yet.
+  const onRegister = useLocation().pathname.startsWith("/register");
+
   return (
     <>
-      <LoginModal />
+      {!onRegister && <LoginModal />}
       <Routes>
+        <Route path="/register" element={<RegisterPage />} />
         <Route element={<Layout />}>
           <Route index element={<Dashboard />} />
           <Route path="wallets" element={<Wallets />} />

@@ -54,6 +54,17 @@ async function request(path, opts = {}) {
 }
 
 export const api = {
+  // Auth (V8 — Phase 1)
+  login:           (username, password) => request("/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ username, password }),
+  }),
+  logout:          ()          => request("/auth/logout", { method: "POST" }).catch(() => null),
+  me:              ()          => request("/auth/me"),
+  createInvite:    ()          => request("/auth/invite",       { method: "POST" }),
+  listInvites:     ()          => request("/auth/invitations"),
+  revokeInvite:    (token)     => request(`/auth/invitations/${token}`, { method: "DELETE" }),
+
   getHealth:   ()          => request("/health"),
   getWallets:  ()          => request("/wallets"),
   addWallet:   (addr)      => request("/wallets", { method: "POST", body: JSON.stringify({ addr }) }),

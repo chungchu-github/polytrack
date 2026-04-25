@@ -1,7 +1,55 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, setToken } from "../api/client.js";
+import InviteManager from "../components/InviteManager.jsx";
 import clsx from "clsx";
+
+// SessionCard — replaces the old API_TOKEN field. Shows the logged-in user
+// and provides a logout button (clears the JWT and forces LoginModal to
+// re-prompt). Defined here so Settings.jsx stays self-contained.
+function SessionCard() {
+  const { data, isLoading } = useQuery({ queryKey: ["me"], queryFn: api.me });
+  const user = data?.user;
+
+  function handleLogout() {
+    api.logout();              // best-effort, server is stateless
+    setToken("");              // wipe localStorage
+    window.dispatchEvent(new CustomEvent("polytrack:auth-required"));
+  }
+
+  return (
+    <div className="card">
+      <h2 className="card-header">Session</h2>
+      {isLoading ? (
+        <p className="text-sm text-surface-500">Loading…</p>
+      ) : user ? (
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm text-surface-200">
+              Signed in as <strong className="text-primary">{user.username}</strong>
+              <span className="ml-2 text-2xs uppercase tracking-wider text-surface-500">
+                {user.role}
+              </span>
+            </p>
+            {user.last_login && (
+              <p className="text-2xs text-surface-600 mt-0.5">
+                Last login: {new Date(user.last_login).toLocaleString()}
+              </p>
+            )}
+          </div>
+          <button
+            onClick={handleLogout}
+            className="px-3 py-1.5 rounded-md border border-surface-700 text-xs text-surface-300 hover:bg-surface-800 transition-colors"
+          >
+            Sign out
+          </button>
+        </div>
+      ) : (
+        <p className="text-sm text-danger">Not signed in.</p>
+      )}
+    </div>
+  );
+}
 
 const CONFIG_FIELDS = [
   { key: "maxTradeUsdc",         label: "Max Trade Size (USDC)",   step: "1",    hint: "Default position size per auto-trade" },
@@ -60,9 +108,6 @@ export default function Settings() {
   const { data: health } = useQuery({ queryKey: ["health"], queryFn: api.getHealth, refetchInterval: 10_000 });
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.getConfig });
 
-  const [token, setTokenInput] = useState(localStorage.getItem("polytrack_token") || "");
-  const [tokenSaved, setTokenSaved] = useState(false);
-
   const [form, setForm] = useState({});
   const [cfgSaved, setCfgSaved] = useState(false);
   useEffect(() => { if (config) setForm(config); }, [config]);
@@ -86,13 +131,6 @@ export default function Settings() {
     mutationFn: () => api.triggerScan(),
   });
 
-  function handleSaveToken() {
-    setToken(token.trim());
-    setTokenSaved(true);
-    setTimeout(() => setTokenSaved(false), 2000);
-    queryClient.invalidateQueries();
-  }
-
   return (
     <div className="space-y-6 animate-fade-in max-w-2xl">
       <h1 className="font-display text-xl font-bold tracking-wider text-surface-50">
@@ -115,26 +153,12 @@ export default function Settings() {
         </p>
       </div>
 
-      {/* API Token */}
-      <div className="card">
-        <h2 className="card-header">Authentication</h2>
-        <label htmlFor="api-token" className="text-xs text-surface-400 block mb-1.5">
-          API Token (matches server API_TOKEN env var)
-        </label>
-        <div className="flex gap-2">
-          <input
-            id="api-token"
-            type="password"
-            value={token}
-            onChange={(e) => setTokenInput(e.target.value)}
-            placeholder="Enter API token"
-            className="flex-1 rounded-md border border-surface-700 bg-surface-800 px-3 py-2 text-sm text-surface-200 placeholder:text-surface-600 focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/30"
-          />
-          <button onClick={handleSaveToken} className="btn-primary">
-            {tokenSaved ? "Saved" : "Save"}
-          </button>
-        </div>
-      </div>
+      {/* Session — replaces the old API Token field. JWT-based now. */}
+      <SessionCard />
+
+      {/* Invite Manager (admin only) */}
+      <InviteManager />
+
 
       {/* Auto-Copy */}
       <div className="card">
