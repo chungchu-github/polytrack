@@ -118,6 +118,9 @@ export const api = {
   // PR B — auto-import via cron (admin only)
   runAutoImport:    ()      => request("/import/run", { method: "POST" }),
 
+  // killSwitch — autonomous safety brake. Clear is admin-only.
+  clearKillSwitch:  ()      => request("/killswitch/clear", { method: "POST" }),
+
   // V2 Gate — edge validation across all strategies
   validateEdge:    (params = {}) => request("/validate-edge", {
     method: "POST",

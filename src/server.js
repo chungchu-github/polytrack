@@ -65,6 +65,7 @@ import {
   generateInviteToken, inviteExpiry,
 } from "./auth.js";
 import { pollAndImport } from "./leaderboard-poller.js";
+import { evaluateKillSwitch } from "./killswitch.js";
 import { ethers } from "ethers";
 
 dotenv.config();
@@ -397,6 +398,35 @@ async function runScan() {
       await sleep(300);
     }
 
+    // 3.5. Refresh V1 gate snapshot + killSwitch evaluation BEFORE strategies
+    //      detect, so any auto-trade attempted this scan reads fresh values.
+    try {
+      const dcStats = getDataCaptureStats();
+      state.v1ReadyPct = Number(dcStats?.v1ReadyPct || 0);
+    } catch { /* leave previous value */ }
+    try {
+      const ksCfg = loadConfig().killSwitch || {};
+      const verdict = evaluateKillSwitch(state.autoTrades || [], ksCfg);
+      if (verdict.trip && !state.killSwitch?.active) {
+        state.killSwitch = {
+          active:    true,
+          reason:    verdict.reason,
+          metrics:   verdict.metrics,
+          trippedAt: Date.now(),
+        };
+        state.autoEnabled = false;
+        log.warn(`KILLSWITCH TRIPPED — ${verdict.reason}; auto-trade disabled`);
+        emit("killswitch:tripped", state.killSwitch);
+      } else if (!state.killSwitch) {
+        state.killSwitch = { active: false, reason: null, metrics: verdict.metrics, trippedAt: null };
+      } else if (!state.killSwitch.active) {
+        // keep latest metrics visible even when not tripped
+        state.killSwitch.metrics = verdict.metrics;
+      }
+    } catch (e) {
+      log.warn(`killSwitch evaluation failed: ${e.message}`);
+    }
+
     // 4. Detect signals (multi-strategy via StrategyEngine)
     const walletList = getWalletList(state);
     const detectCtx = {
@@ -666,6 +696,17 @@ app.get("/health", (_, res) => {
       skippedByEdgeCount: state.lastSkippedByEdge?.length || 0,
       lastSkippedByEdge: state.lastSkippedByEdge || [],
     },
+    killSwitch: state.killSwitch || { active: false, reason: null, metrics: null, trippedAt: null },
+    v1Gate: {
+      readyPct:    Number(state.v1ReadyPct ?? 0),
+      enforced:    !(Number(loadConfig().liveTestCapUsdc || 0) > 0)
+                   && String(process.env.BYPASS_V1_GATE || "").toLowerCase() !== "true",
+      bypassReason: Number(loadConfig().liveTestCapUsdc || 0) > 0
+                    ? "liveTestCapUsdc > 0 (V3 small-amount validation)"
+                    : (String(process.env.BYPASS_V1_GATE || "").toLowerCase() === "true"
+                       ? "BYPASS_V1_GATE env"
+                       : null),
+    },
     autoImport: {
       lastRunAt: state.lastAutoImportAt || null,
       lastResult: state.lastAutoImportResult || null,
@@ -758,12 +799,34 @@ app.get("/stats/pnl-by-strategy", requireAuth, (_, res) => {
   }
 });
 
-// Toggle auto-copy (auth required)
+// Toggle auto-copy (auth required). Refuses to enable while killSwitch is
+// active — operator must clear it explicitly first (intentional friction).
 app.post("/auto", requireAuth, (req, res) => {
-  state.autoEnabled = !!req.body.enabled;
+  const wantEnable = !!req.body.enabled;
+  if (wantEnable && state.killSwitch?.active) {
+    return res.status(409).json({
+      error: "killSwitch active — clear it first via POST /killswitch/clear",
+      killSwitch: state.killSwitch,
+    });
+  }
+  state.autoEnabled = wantEnable;
   log.info(`Auto-copy ${state.autoEnabled ? "ENABLED" : "DISABLED"}`);
   emit("auto:status", { enabled: state.autoEnabled });
   res.json({ enabled: state.autoEnabled });
+});
+
+// Clear the killSwitch — admin only. Operator must consciously acknowledge
+// the trip reason before resuming auto-trade. Auto-enable is NOT restored;
+// operator must POST /auto separately so the resume is two intentional steps.
+app.post("/killswitch/clear", requireAuth, requireAdmin, (_req, res) => {
+  if (!state.killSwitch?.active) {
+    return res.json({ cleared: false, reason: "not active" });
+  }
+  const prev = state.killSwitch;
+  state.killSwitch = { active: false, reason: null, metrics: prev.metrics, trippedAt: null };
+  log.info(`killSwitch cleared (was: ${prev.reason})`);
+  emit("killswitch:cleared", { previousReason: prev.reason });
+  res.json({ cleared: true, previousReason: prev.reason });
 });
 
 // Manual scan trigger (auth required, rate limited)
