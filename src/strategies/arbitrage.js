@@ -5,6 +5,14 @@
  *
  * Requires the latest market_snapshot for both outcome tokens on the same
  * market. Emits direction "YES" (convention: caller would mirror on NO).
+ *
+ * Liquidity gate (critical): Polymarket's CLOB returns sentinel pricing
+ * (bid=0.01, ask=0.99, mid=0.5) for outcomes with no real orderbook —
+ * common on long-tail / far-future markets. Computing edge from those
+ * sentinels yields edgePct ≈ 98% on every illiquid market, flooding the
+ * dashboard with strength-100 signals that aren't tradeable. The fix is
+ * to require BOTH outcomes to have real bid > minLiquidBid AND tight
+ * spread (ask−bid ≤ maxSpread) before computing the edge.
  */
 import { BaseStrategy } from "./base.js";
 
@@ -13,9 +21,27 @@ export class ArbitrageStrategy extends BaseStrategy {
     return {
       enabled: false,
       minEdgePct: 1.5,
+      // Sentinel-rejection gates. Tunable via config but the defaults
+      // are what catches Polymarket's 0.01/0.99 placeholder.
+      minLiquidBid: 0.02,   // bids ≤ this look like sentinel/no-book
+      maxSpread:    0.10,   // bid-ask wider than this = no real liquidity
     };
   }
   get name() { return "arbitrage"; }
+
+  /** Snapshot has real, tradeable liquidity (not Polymarket's placeholder)? */
+  static hasRealLiquidity(snap, { minLiquidBid, maxSpread }) {
+    if (!snap) return false;
+    // null/undefined check before Number() — Number(null)=0 silently passes
+    // the isFinite gate otherwise, defeating the spread/sentinel guard.
+    if (snap.best_bid == null || snap.best_ask == null) return false;
+    const bid = Number(snap.best_bid);
+    const ask = Number(snap.best_ask);
+    if (!Number.isFinite(bid) || bid <= minLiquidBid) return false;
+    if (!Number.isFinite(ask) || ask >= 1 - minLiquidBid) return false;
+    if (ask - bid > maxSpread) return false;
+    return true;
+  }
 
   detect({ markets, history, now = Date.now() }) {
     const cfg = this.config;
@@ -35,13 +61,19 @@ export class ArbitrageStrategy extends BaseStrategy {
           if (!prev || s.timestamp > prev.timestamp) latestByToken[s.token_id] = s;
         }
 
-        const bids = tokens
+        const tokenSnaps = tokens
           .map(t => latestByToken[t.token_id || t.tokenId || t])
-          .filter(s => s && s.best_bid != null)
-          .map(s => s.best_bid);
-        if (bids.length < 2) continue;
+          .filter(Boolean);
+        if (tokenSnaps.length < 2) continue;
 
-        const sum = bids[0] + bids[1];
+        // Both sides must have real liquidity. One placeholder side is
+        // enough to disqualify — we can't actually buy the other leg.
+        const allLiquid = tokenSnaps.every(s =>
+          ArbitrageStrategy.hasRealLiquidity(s, cfg)
+        );
+        if (!allLiquid) continue;
+
+        const sum = tokenSnaps[0].best_bid + tokenSnaps[1].best_bid;
         const edgePct = (1 - sum) * 100;
         if (edgePct < cfg.minEdgePct) continue;
 
