@@ -11,12 +11,43 @@
  * every relevant check returns { ok: true }.
  */
 
-const DAILY_LOSS_LIMIT   = Number(process.env.MAX_DAILY_LOSS_USDC       || 200);
-const MARKET_EXPOSURE    = Number(process.env.MAX_MARKET_EXPOSURE_USDC  || 300);
-const TOTAL_EXPOSURE     = Number(process.env.MAX_TOTAL_EXPOSURE_USDC   || 1000);
-const MARKET_COOLDOWN_MS = Number(process.env.MARKET_COOLDOWN_MIN || 30) * 60_000;
+// Module-load env defaults — kept as a fallback when neither runtime config
+// nor an explicit cfg argument supplies a value. Precedence (audit P2-2):
+//   cfg arg  >  env  >  hardcoded
+const ENV_DAILY_LOSS    = Number(process.env.MAX_DAILY_LOSS_USDC       || 200);
+const ENV_MARKET_EXP    = Number(process.env.MAX_MARKET_EXPOSURE_USDC  || 300);
+const ENV_TOTAL_EXP     = Number(process.env.MAX_TOTAL_EXPOSURE_USDC   || 1000);
+const ENV_COOLDOWN_MS   = Number(process.env.MARKET_COOLDOWN_MIN || 30) * 60_000;
+
+/** Pick numeric value from cfg first, env second, hardcoded last. */
+function pickLimit(cfgVal, envVal, fallback) {
+  const c = Number(cfgVal);
+  if (Number.isFinite(c) && c > 0) return c;
+  const e = Number(envVal);
+  if (Number.isFinite(e) && e > 0) return e;
+  return fallback;
+}
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Resolve current limits from config — exported for /health snapshots and tests.
+ * Live config wins; env is the deployment-time fallback; hardcoded is the
+ * last-resort safety net (so a wholly empty config doesn't leave us with
+ * no caps at all).
+ */
+export function resolveRiskLimits(cfg = {}) {
+  return {
+    dailyLossLimit:  pickLimit(cfg.maxDailyLossUsdc,      ENV_DAILY_LOSS,  200),
+    marketExposure:  pickLimit(cfg.maxMarketExposureUsdc, ENV_MARKET_EXP,  300),
+    totalExposure:   pickLimit(cfg.maxTotalExposureUsdc,  ENV_TOTAL_EXP,   1000),
+    marketCooldownMs: (() => {
+      const c = Number(cfg.marketCooldownMin);
+      if (Number.isFinite(c) && c >= 0) return c * 60_000;
+      return ENV_COOLDOWN_MS;
+    })(),
+  };
+}
 
 /**
  * Sum of realized PnL for trades marked as losing in the last 24h.
@@ -96,10 +127,35 @@ export function lastMarketTradeTs(state, conditionId) {
  * @param {object} [cfg]      Optional runtime config overrides (V3 liveTest cap, etc.)
  */
 export function checkRiskLimits(state, conditionId, sizeUsdc, cfg = {}) {
+  const limits = resolveRiskLimits(cfg);
+
+  // killSwitch: set by autonomous evaluator when rolling-Sharpe / lifetime-PnL
+  // / drawdown crosses pre-set thresholds. Until operator manually clears
+  // (POST /killswitch/clear), no auto-trade can execute. Manual /trade still
+  // works — operator override is intentional.
+  if (state.killSwitch?.active) {
+    return { ok: false, reason: `killSwitch active: ${state.killSwitch.reason}` };
+  }
+
+  // V1 Gate (audit P0-2): block auto-trades until 30-day data accumulation
+  // is complete, UNLESS one of two opt-out conditions is set:
+  //   1. liveTestCapUsdc > 0  → operator is explicitly in V3 small-amount
+  //      validation mode (cumulative cap below already enforced)
+  //   2. env BYPASS_V1_GATE=true  → emergency / advanced operator escape
+  // Without an opt-out, the dashboard's progress bar is now also a hard gate.
+  const v1Pct = Number(state.v1ReadyPct ?? 0);
+  const liveCap = Number(cfg.liveTestCapUsdc || 0);
+  const envBypass = String(process.env.BYPASS_V1_GATE || "").toLowerCase() === "true";
+  if (v1Pct < 100 && liveCap <= 0 && !envBypass) {
+    return {
+      ok: false,
+      reason: `V1 Gate ${v1Pct}% / 100% — set liveTestCapUsdc > 0 (small-amount validation) or BYPASS_V1_GATE=true to override`,
+    };
+  }
+
   // V3 live-test hard cap: cumulative FILLED/PARTIAL auto-trade USDC must
   // stay ≤ liveTestCapUsdc. This is a belt-and-suspenders guard for the
   // small-amount end-to-end validation window. 0 = disabled.
-  const liveCap = Number(cfg.liveTestCapUsdc || 0);
   if (liveCap > 0) {
     const lifetime = lifetimeAutoTradeUsdc(state);
     if (lifetime + sizeUsdc > liveCap) {
@@ -111,23 +167,23 @@ export function checkRiskLimits(state, conditionId, sizeUsdc, cfg = {}) {
   }
 
   const loss = dailyRealizedLoss(state);
-  if (loss >= DAILY_LOSS_LIMIT) {
-    return { ok: false, reason: `Daily loss $${loss.toFixed(2)} >= limit $${DAILY_LOSS_LIMIT}` };
+  if (loss >= limits.dailyLossLimit) {
+    return { ok: false, reason: `Daily loss $${loss.toFixed(2)} >= limit $${limits.dailyLossLimit}` };
   }
 
   const marketExp = marketExposure(state, conditionId);
-  if (marketExp + sizeUsdc > MARKET_EXPOSURE) {
-    return { ok: false, reason: `Market exposure $${(marketExp + sizeUsdc).toFixed(2)} > limit $${MARKET_EXPOSURE}` };
+  if (marketExp + sizeUsdc > limits.marketExposure) {
+    return { ok: false, reason: `Market exposure $${(marketExp + sizeUsdc).toFixed(2)} > limit $${limits.marketExposure}` };
   }
 
   const totalExp = totalExposure(state);
-  if (totalExp + sizeUsdc > TOTAL_EXPOSURE) {
-    return { ok: false, reason: `Total exposure $${(totalExp + sizeUsdc).toFixed(2)} > limit $${TOTAL_EXPOSURE}` };
+  if (totalExp + sizeUsdc > limits.totalExposure) {
+    return { ok: false, reason: `Total exposure $${(totalExp + sizeUsdc).toFixed(2)} > limit $${limits.totalExposure}` };
   }
 
   const lastTs = lastMarketTradeTs(state, conditionId);
-  if (lastTs > 0 && Date.now() - lastTs < MARKET_COOLDOWN_MS) {
-    const remainMin = Math.ceil((MARKET_COOLDOWN_MS - (Date.now() - lastTs)) / 60_000);
+  if (lastTs > 0 && Date.now() - lastTs < limits.marketCooldownMs) {
+    const remainMin = Math.ceil((limits.marketCooldownMs - (Date.now() - lastTs)) / 60_000);
     return { ok: false, reason: `Market cooldown — ${remainMin} min remaining` };
   }
 
@@ -136,13 +192,14 @@ export function checkRiskLimits(state, conditionId, sizeUsdc, cfg = {}) {
 
 export function getRiskSnapshot(state, cfg = {}) {
   const liveCap = Number(cfg.liveTestCapUsdc || 0);
+  const limits = resolveRiskLimits(cfg);
   return {
     dailyLoss:       Math.round(dailyRealizedLoss(state) * 100) / 100,
-    dailyLossLimit:  DAILY_LOSS_LIMIT,
+    dailyLossLimit:  limits.dailyLossLimit,
     totalExposure:   Math.round(totalExposure(state) * 100) / 100,
-    totalLimit:      TOTAL_EXPOSURE,
-    marketLimit:     MARKET_EXPOSURE,
-    cooldownMin:     MARKET_COOLDOWN_MS / 60_000,
+    totalLimit:      limits.totalExposure,
+    marketLimit:     limits.marketExposure,
+    cooldownMin:     limits.marketCooldownMs / 60_000,
     liveTestCapUsdc: liveCap,
     liveTestUsed:    liveCap > 0 ? Math.round(lifetimeAutoTradeUsdc(state) * 100) / 100 : 0,
   };

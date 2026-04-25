@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   dailyRealizedLoss, marketExposure, totalExposure,
-  lastMarketTradeTs, checkRiskLimits, getRiskSnapshot,
+  lastMarketTradeTs, checkRiskLimits, getRiskSnapshot, resolveRiskLimits,
 } from "../src/risk.js";
 
 // Defaults (must match env fallbacks in src/risk.js)
@@ -11,8 +11,10 @@ const MARKET_LIMIT = 300;
 const TOTAL_LIMIT  = 1000;
 const COOLDOWN_MS  = 30 * 60_000;
 
+// Default state has v1ReadyPct=100 so existing tests aren't blocked by the
+// V1 gate; tests for the gate itself construct state explicitly.
 function mkState(autoTrades) {
-  return { autoTrades };
+  return { autoTrades, v1ReadyPct: 100 };
 }
 
 describe("risk — daily realized loss", () => {
@@ -170,5 +172,88 @@ describe("risk — lastMarketTradeTs", () => {
       { conditionId: "Y", executedAt: now + 1,      status: "FILLED" },
     ]);
     assert.equal(lastMarketTradeTs(state, "X"), now);
+  });
+});
+
+// ── Config precedence (audit P2-2) ──────────────────────────────────────────
+
+describe("risk — resolveRiskLimits config precedence", () => {
+  it("config value wins over env fallback", () => {
+    const limits = resolveRiskLimits({ maxDailyLossUsdc: 50 });
+    assert.equal(limits.dailyLossLimit, 50);
+  });
+  it("falls through to env when cfg missing", () => {
+    const limits = resolveRiskLimits({});
+    assert.equal(limits.dailyLossLimit, 200);   // env or hardcoded fallback
+  });
+  it("ignores invalid cfg values (negative / non-numeric)", () => {
+    const limits = resolveRiskLimits({
+      maxDailyLossUsdc: -5, maxMarketExposureUsdc: "junk",
+    });
+    assert.equal(limits.dailyLossLimit, 200);
+    assert.equal(limits.marketExposure, 300);
+  });
+  it("0 cooldown is honored (operator opt-out)", () => {
+    const limits = resolveRiskLimits({ marketCooldownMin: 0 });
+    assert.equal(limits.marketCooldownMs, 0);
+  });
+});
+
+// ── V1 Gate (audit P0-2) ────────────────────────────────────────────────────
+
+describe("risk — V1 Gate enforcement", () => {
+  it("blocks when v1ReadyPct < 100 and no bypass", () => {
+    const state = { autoTrades: [], v1ReadyPct: 30 };
+    const r = checkRiskLimits(state, "CID-A", 50);
+    assert.equal(r.ok, false);
+    assert.match(r.reason, /V1 Gate 30/);
+  });
+
+  it("bypasses gate when liveTestCapUsdc > 0 (V3 small-amount mode)", () => {
+    const state = { autoTrades: [], v1ReadyPct: 30 };
+    const r = checkRiskLimits(state, "CID-A", 5, { liveTestCapUsdc: 60 });
+    assert.equal(r.ok, true);
+  });
+
+  it("bypasses gate when env BYPASS_V1_GATE=true", () => {
+    const state = { autoTrades: [], v1ReadyPct: 0 };
+    process.env.BYPASS_V1_GATE = "true";
+    try {
+      const r = checkRiskLimits(state, "CID-A", 50);
+      assert.equal(r.ok, true);
+    } finally {
+      delete process.env.BYPASS_V1_GATE;
+    }
+  });
+
+  it("passes when v1ReadyPct >= 100", () => {
+    const state = { autoTrades: [], v1ReadyPct: 100 };
+    const r = checkRiskLimits(state, "CID-A", 50);
+    assert.equal(r.ok, true);
+  });
+});
+
+// ── killSwitch integration ──────────────────────────────────────────────────
+
+describe("risk — killSwitch refusal", () => {
+  it("refuses every auto-trade when killSwitch.active", () => {
+    const state = {
+      autoTrades: [],
+      v1ReadyPct: 100,
+      killSwitch: { active: true, reason: "lifetime PnL $-40 <= -$30" },
+    };
+    const r = checkRiskLimits(state, "CID-A", 5);
+    assert.equal(r.ok, false);
+    assert.match(r.reason, /killSwitch/);
+  });
+
+  it("does not refuse when killSwitch.active=false", () => {
+    const state = {
+      autoTrades: [],
+      v1ReadyPct: 100,
+      killSwitch: { active: false, reason: null },
+    };
+    const r = checkRiskLimits(state, "CID-A", 5);
+    assert.equal(r.ok, true);
   });
 });

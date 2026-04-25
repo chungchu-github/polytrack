@@ -185,6 +185,12 @@ export default function Settings() {
         onSave={(patch) => cfgMutation.mutate({ autoImport: patch })}
       />
 
+      {/* killSwitch — autonomous safety brake (read-only status + clear) */}
+      <KillSwitchCard
+        killSwitch={health?.killSwitch}
+        v1Gate={health?.v1Gate}
+      />
+
       {/* Auto-Copy */}
       <div className="card">
         <h2 className="card-header">Auto-Copy Trading</h2>
@@ -702,4 +708,120 @@ function formatRelativeAgo(ms) {
   if (sec < 3600) return `${Math.round(sec / 60)}m`;
   if (sec < 86400) return `${Math.round(sec / 3600)}h`;
   return `${Math.round(sec / 86400)}d`;
+}
+
+/**
+ * KillSwitchCard — read-only status of the autonomous trade brake.
+ *
+ * Shows the V1 Gate progress, killSwitch active/inactive state, latest
+ * metrics (lifetime PnL / drawdown / rolling Sharpe), and a "Clear" action
+ * when tripped. Operator must clear killSwitch BEFORE re-enabling auto-trade
+ * — the /auto endpoint refuses while killSwitch.active is true.
+ */
+function KillSwitchCard({ killSwitch, v1Gate }) {
+  const queryClient = useQueryClient();
+  const clearMut = useMutation({
+    mutationFn: () => api.clearKillSwitch(),
+    onSuccess: (r) => {
+      if (r.cleared) toast.success(`killSwitch cleared (was: ${r.previousReason})`);
+      else toast.message("killSwitch was not active");
+      queryClient.invalidateQueries({ queryKey: ["health"] });
+    },
+    onError: (e) => toast.error(e.message || "Failed to clear killSwitch"),
+  });
+
+  const ks = killSwitch || { active: false, reason: null, metrics: null, trippedAt: null };
+  const v1 = v1Gate || { readyPct: 0, enforced: true, bypassReason: null };
+  const m = ks.metrics || {};
+
+  return (
+    <div className="card">
+      <h2 className="card-header flex items-center justify-between">
+        <span>Safety Brakes</span>
+        <span className={`text-xs px-2 py-0.5 rounded-full ${
+          ks.active
+            ? "bg-rose-900/40 text-rose-200"
+            : "bg-emerald-900/30 text-emerald-300"
+        }`}>
+          {ks.active ? "TRIPPED" : "armed"}
+        </span>
+      </h2>
+
+      {/* V1 Gate */}
+      <div className="mb-4">
+        <div className="flex items-center justify-between text-sm mb-1">
+          <span className="text-surface-300">V1 Gate (30-day data accumulation)</span>
+          <span className="tabular-nums text-surface-200">{v1.readyPct}% / 100%</span>
+        </div>
+        <div className="h-1.5 bg-surface-800 rounded overflow-hidden">
+          <div
+            className="h-full bg-primary transition-all"
+            style={{ width: `${Math.min(100, v1.readyPct)}%` }}
+          />
+        </div>
+        <p className="text-2xs text-surface-500 mt-1">
+          {v1.enforced
+            ? "Enforced — auto-trade blocked until 100% (or set liveTestCapUsdc > 0 to override)"
+            : `Bypassed — ${v1.bypassReason}`}
+        </p>
+      </div>
+
+      {/* killSwitch status */}
+      {ks.active ? (
+        <div className="rounded-md border border-rose-800/60 bg-rose-950/30 p-3 mb-3">
+          <div className="text-sm font-medium text-rose-200 mb-1">
+            Auto-trade has been disabled by killSwitch
+          </div>
+          <div className="text-xs text-rose-300/80 mb-2">
+            Reason: {ks.reason}
+          </div>
+          <div className="text-2xs text-surface-500">
+            Tripped {ks.trippedAt ? formatRelativeAgo(Date.now() - ks.trippedAt) + " ago" : "—"}
+          </div>
+          <button
+            onClick={() => clearMut.mutate()}
+            disabled={clearMut.isPending}
+            className="mt-3 rounded-md bg-rose-800/80 hover:bg-rose-700 disabled:opacity-50 px-3 py-1.5 text-xs text-rose-50"
+          >
+            {clearMut.isPending ? "Clearing…" : "Acknowledge & clear"}
+          </button>
+        </div>
+      ) : (
+        <div className="text-xs text-surface-400 mb-3">
+          Auto-disables trading when any of the three conditions trips.
+          Manual /trade still works — the brake only stops unattended losing.
+        </div>
+      )}
+
+      {/* Latest metrics */}
+      <div className="grid grid-cols-3 gap-2">
+        <Metric label="Lifetime PnL" value={fmtUsd(m.lifetimePnl)} />
+        <Metric label="Drawdown"     value={fmtPct(m.drawdown)} />
+        <Metric label="28d Sharpe"   value={fmtSharpe(m.sharpe)} />
+      </div>
+    </div>
+  );
+}
+
+function Metric({ label, value }) {
+  return (
+    <div className="rounded border border-surface-800 bg-surface-900/50 p-2">
+      <div className="text-2xs text-surface-500 uppercase tracking-wide">{label}</div>
+      <div className="text-sm tabular-nums text-surface-100">{value}</div>
+    </div>
+  );
+}
+
+function fmtUsd(v) {
+  if (v == null || !Number.isFinite(v)) return "—";
+  const sign = v >= 0 ? "+" : "−";
+  return `${sign}$${Math.abs(v).toFixed(2)}`;
+}
+function fmtPct(v) {
+  if (v == null || !Number.isFinite(v)) return "—";
+  return `${(v * 100).toFixed(1)}%`;
+}
+function fmtSharpe(v) {
+  if (v == null || !Number.isFinite(v)) return "n/a";
+  return v.toFixed(2);
 }

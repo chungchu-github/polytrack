@@ -39,6 +39,17 @@ const DEFAULTS = {
     maxHoldDays: 14,
     stopLossPct: 0.30,
   },
+  // killSwitch — autonomous auto-trade circuit breaker. Trips when any of
+  // three conditions hits the configured threshold. Default thresholds are
+  // set for the V1 small-amount validation budget ($50-100). Adjust upward
+  // for larger live deployments after the strategy proves out.
+  killSwitch: {
+    enabled:               true,
+    maxLifetimeLossUsdc:   30,
+    maxDrawdownPct:        0.25,
+    minRollingSharpe:     -0.5,
+    rollingWindowDays:     28,
+  },
   // PR B — periodic leaderboard auto-import. Disabled by default; operator
   // opts in via Settings UI. Conservative thresholds so a single run can't
   // flood the watch list with marginal candidates.
@@ -89,6 +100,10 @@ export function saveConfig(patch) {
       next.autoImport = mergeAutoImport(current.autoImport || DEFAULTS.autoImport, v);
       continue;
     }
+    if (k === "killSwitch" && v && typeof v === "object") {
+      next.killSwitch = mergeKillSwitch(current.killSwitch || DEFAULTS.killSwitch, v);
+      continue;
+    }
     if (typeof DEFAULTS[k] === "number") {
       const n = Number(v);
       if (!Number.isFinite(n) || n < 0) continue;
@@ -118,6 +133,22 @@ function mergeAutoImport(existing, patch) {
       .map(w => String(w))
       .filter(w => allowed.has(w));
     if (out.windows.length === 0) out.windows = base.windows;
+  }
+  return out;
+}
+
+function mergeKillSwitch(existing, patch) {
+  const base = existing || DEFAULTS.killSwitch;
+  const out = { ...base };
+  if (typeof patch.enabled === "boolean") out.enabled = patch.enabled;
+  for (const numKey of ["maxLifetimeLossUsdc", "maxDrawdownPct", "rollingWindowDays"]) {
+    if (Number.isFinite(Number(patch[numKey])) && Number(patch[numKey]) >= 0) {
+      out[numKey] = Number(patch[numKey]);
+    }
+  }
+  // minRollingSharpe is allowed to be negative — typical thresholds are -0.5 etc
+  if (Number.isFinite(Number(patch.minRollingSharpe))) {
+    out.minRollingSharpe = Number(patch.minRollingSharpe);
   }
   return out;
 }
