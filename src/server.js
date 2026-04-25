@@ -1229,7 +1229,7 @@ async function runExits() {
         price:    exitPrice,
         side:     1,             // SELL
         tokenQty: fillSize,
-        negRisk:  false,         // TODO: persist negRisk on the trade row
+        negRisk:  !!t.neg_risk,  // honour the original exchange routing
       });
       const signature = await signOrder({ privateKey: PRIVATE_KEY, orderData, domain });
       const payload = wrapOrderPayload({ orderData, signature, orderType: "FOK" });

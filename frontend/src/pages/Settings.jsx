@@ -170,6 +170,12 @@ export default function Settings() {
       {/* Invite Manager (admin only) */}
       <InviteManager />
 
+      {/* Auto-Exit Policy — P0 #4 */}
+      <ExitPolicyCard
+        value={form.exitPolicy}
+        saving={cfgMutation.isPending}
+        onSave={(patch) => cfgMutation.mutate({ exitPolicy: patch })}
+      />
 
       {/* Auto-Copy */}
       <div className="card">
@@ -414,4 +420,116 @@ function formatUptime(seconds) {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+/**
+ * ExitPolicyCard — toggles + tunes the auto-exit / stop-loss cron.
+ *
+ * Backend stores `stopLossPct` as a 0-1 fraction; UI shows it as a percent
+ * so users don't have to translate. The toggle is intentionally separate
+ * from auto-copy: you might want exits firing even after disabling new
+ * trades (cleanup mode).
+ */
+function ExitPolicyCard({ value, saving, onSave }) {
+  const policy = value || { enabled: false, maxHoldDays: 14, stopLossPct: 0.30 };
+  const [maxDays, setMaxDays] = useState(policy.maxHoldDays);
+  const [slPct,  setSlPct]    = useState(Math.round((policy.stopLossPct || 0) * 100));
+
+  // Sync local state when config refetches.
+  useEffect(() => {
+    setMaxDays(policy.maxHoldDays);
+    setSlPct(Math.round((policy.stopLossPct || 0) * 100));
+  }, [policy.maxHoldDays, policy.stopLossPct]);
+
+  const enabled = !!policy.enabled;
+  const dirty   =
+    Number(maxDays) !== Number(policy.maxHoldDays) ||
+    Math.abs(Number(slPct) / 100 - Number(policy.stopLossPct || 0)) > 1e-9;
+
+  return (
+    <div className="card">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="card-header !mb-1">Auto-Exit Policy</h2>
+          <p className="text-2xs text-surface-500">
+            Closes filled positions when held too long, or when mark-to-market drops past your tolerance.
+            Submits a SELL to the same exchange the BUY went to.
+          </p>
+        </div>
+        <button
+          onClick={() => onSave({ enabled: !enabled })}
+          disabled={saving}
+          className={clsx(
+            "relative inline-flex h-7 w-12 shrink-0 cursor-pointer items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-primary/30",
+            enabled ? "bg-primary" : "bg-surface-600"
+          )}
+          role="switch"
+          aria-checked={enabled}
+          aria-label="Toggle auto-exit policy"
+        >
+          <span
+            className={clsx(
+              "inline-block h-5 w-5 rounded-full bg-white shadow-sm transition-transform",
+              enabled ? "translate-x-6" : "translate-x-1"
+            )}
+          />
+        </button>
+      </div>
+
+      <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <label className="flex flex-col gap-1">
+          <span className="text-2xs uppercase tracking-wider text-surface-400">
+            Max hold (days) — 0 disables
+          </span>
+          <input
+            type="number"
+            min="0"
+            step="1"
+            value={maxDays}
+            onChange={(e) => setMaxDays(e.target.value)}
+            className="rounded-md border border-surface-700 bg-surface-800 px-3 py-2 text-sm text-surface-200 tabular-nums focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/30"
+          />
+          <span className="text-2xs text-surface-600">
+            Exit any FILLED trade older than this. Independent of price.
+          </span>
+        </label>
+
+        <label className="flex flex-col gap-1">
+          <span className="text-2xs uppercase tracking-wider text-surface-400">
+            Stop-loss (%) — 0 disables
+          </span>
+          <input
+            type="number"
+            min="0"
+            max="100"
+            step="1"
+            value={slPct}
+            onChange={(e) => setSlPct(e.target.value)}
+            className="rounded-md border border-surface-700 bg-surface-800 px-3 py-2 text-sm text-surface-200 tabular-nums focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/30"
+          />
+          <span className="text-2xs text-surface-600">
+            Exit when mid-price drops this far below entry.
+          </span>
+        </label>
+      </div>
+
+      <div className="mt-4 flex items-center gap-3">
+        <button
+          onClick={() => onSave({
+            maxHoldDays: Number(maxDays) || 0,
+            stopLossPct: Math.max(0, Math.min(1, Number(slPct) / 100)),
+          })}
+          disabled={!dirty || saving}
+          className="btn-primary"
+        >
+          {saving ? "Saving…" : "Save thresholds"}
+        </button>
+        {!enabled && (
+          <p className="text-2xs text-amber-400">
+            Toggle currently OFF — thresholds are stored but no exits will fire.
+          </p>
+        )}
+      </div>
+    </div>
+  );
 }

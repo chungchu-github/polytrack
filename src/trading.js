@@ -548,6 +548,7 @@ export async function executeCopyTrade(signal, config) {
     txHash: data?.transactionHash,
     error: !ok ? JSON.stringify(data).slice(0, 200) : slippageWarning,
     executedAt: Date.now(),
+    negRisk,        // persisted so runExits routes the SELL to the same exchange
   };
 }
 
