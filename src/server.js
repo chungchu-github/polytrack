@@ -408,6 +408,14 @@ async function runScan() {
     };
     const signals = state.strategyEngine.detectAll(detectCtx);
     state.signals = signals;
+    // Surface entry-edge rejections so operator knows when consensus is
+    // seeing pumped markets but correctly declining to chase.
+    const consensusStore = state.strategyEngine.get("consensus")?.store;
+    const skippedByEdge = consensusStore?.lastSkippedByEdge || [];
+    state.lastSkippedByEdge = skippedByEdge;
+    if (skippedByEdge.length > 0) {
+      log.scan(`Consensus entry-edge: ${skippedByEdge.length} signal(s) skipped (already pumped past ELITE entry)`);
+    }
     emit("signals", signals);
 
     for (const sig of signals) {
@@ -651,6 +659,13 @@ app.get("/health", (_, res) => {
     dataCapture,
     degradationCandidates,
     markets: state.lastMarketFilter || null,
+    consensusFilter: {
+      // How many signals the entry-edge gate dropped on the most recent scan.
+      // Healthy = some non-zero number on hot markets (means we're correctly
+      // declining to chase); zero permanently could mean filter never fires.
+      skippedByEdgeCount: state.lastSkippedByEdge?.length || 0,
+      lastSkippedByEdge: state.lastSkippedByEdge || [],
+    },
     autoImport: {
       lastRunAt: state.lastAutoImportAt || null,
       lastResult: state.lastAutoImportResult || null,
@@ -684,7 +699,7 @@ app.post("/wallets", requireAuth, async (req, res) => {
   try {
     const w = await loadWallet(addr.toLowerCase());
     setWallet(state, w);
-    const signals = state.signalStore.detect(getWalletList(state), state.markets);
+    const signals = state.signalStore.detect(getWalletList(state), state.markets, new HistoryReader());
     emit("wallet:update", w);
     emit("signals", signals);
     res.json(w);
@@ -1197,7 +1212,7 @@ io.on("connection", sock => {
     }
     loadWallet(addr.toLowerCase()).then(w => {
       setWallet(state, w);
-      const signals = state.signalStore.detect(getWalletList(state), state.markets);
+      const signals = state.signalStore.detect(getWalletList(state), state.markets, new HistoryReader());
       emit("wallet:update", w);
       emit("signals", signals);
     }).catch(e => sock.emit("error", { message: e.message }));
