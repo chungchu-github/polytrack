@@ -14,6 +14,7 @@ import {
   insertWalletTier, getWalletTierAt,
   getTradesPnlByStrategy, getWalletDegradationCandidates,
   vacuumDB,
+  blacklistWallet, unblacklistWallet, getBlacklistedWallets,
 } from "../src/db.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -483,5 +484,47 @@ describe("getStats", () => {
     assert.ok(stats.tradeCount >= 1);
     assert.ok(stats.scanCount >= 1);
     assert.ok(stats.lastScan);
+  });
+});
+
+// ── Wallet soft-delete (blacklist round-trip) ───────────────────────────────
+
+describe("wallet blacklist", () => {
+  const ADDR = "0xblack000000000000000000000000000000000000";
+
+  it("blacklistWallet flips the flag; getAllWallets / getBlacklistedWallets reflect it", async () => {
+    upsertWallet({
+      addr: ADDR, score: 80, tier: "ELITE", winRate: 60, roi: 25,
+      sharpe: 1.5, maxDrawdown: 10, timing: 70, consistency: 60,
+      totalPnL: 1500, volume: 50000, closedPositions: 25, openPositions: 1, trades: 30,
+    });
+    // Live before blacklist
+    const liveBefore = getAllWallets().some(w => w.address === ADDR);
+    assert.equal(liveBefore, true);
+
+    const changed = blacklistWallet(ADDR);
+    assert.equal(changed, 1);
+
+    // Removed from live list
+    assert.equal(getAllWallets().some(w => w.address === ADDR), false);
+
+    // Visible in blacklist list
+    const trash = getBlacklistedWallets();
+    const found = trash.find(w => w.address === ADDR);
+    assert.ok(found, "blacklisted wallet should appear in trash");
+    assert.equal(found.tier,  "ELITE");
+    assert.equal(found.score, 80);
+  });
+
+  it("unblacklistWallet restores it back to the live list", () => {
+    const changed = unblacklistWallet(ADDR);
+    assert.equal(changed, 1);
+    assert.equal(getAllWallets().some(w => w.address === ADDR), true);
+    assert.equal(getBlacklistedWallets().some(w => w.address === ADDR), false);
+  });
+
+  it("blacklistWallet returns 0 changes for unknown address", () => {
+    const changed = blacklistWallet("0xnope000000000000000000000000000000000000");
+    assert.equal(changed, 0);
   });
 });

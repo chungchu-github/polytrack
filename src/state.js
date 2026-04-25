@@ -104,6 +104,32 @@ export function setWallet(state, wallet) {
   db.upsertWallet(wallet);
 }
 
+/**
+ * Soft-delete: drops the wallet from the in-memory map (so the next scan
+ * loop won't waste API calls on it) and flips the DB blacklist flag.
+ * V1 history (positions_history / wallet_tier_history) is preserved so
+ * backtests can still see the wallet's past behaviour.
+ *
+ * Returns true if the address was tracked, false if it was unknown.
+ */
+export function removeWallet(state, addr) {
+  const lc = (addr || "").toLowerCase();
+  const had = state.wallets.delete(lc);
+  db.blacklistWallet(lc);
+  return had;
+}
+
+/**
+ * Reverse a soft-delete. The wallet doesn't go back into state.wallets
+ * here — the next scan loop will pick it up via the watch-list rebuild.
+ * Returns true if a row was un-blacklisted, false if no such row.
+ */
+export function restoreWallet(_state, addr) {
+  const lc = (addr || "").toLowerCase();
+  const changes = db.unblacklistWallet(lc);
+  return changes > 0;
+}
+
 export function addTrade(state, trade, maxHistory = 100) {
   state.autoTrades.unshift(trade);
   state.autoTrades = state.autoTrades.slice(0, maxHistory);
