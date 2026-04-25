@@ -59,6 +59,10 @@ dotenv.config();
 
 // ── Config ───────────────────────────────────────────────────────────────────
 const PORT            = Number(process.env.PORT || 3001);
+// HOST defaults to 0.0.0.0 only when explicitly opted in via env. Default to
+// 127.0.0.1 so a misconfigured deployment doesn't expose the dashboard
+// publicly — safer when ufw isn't in front.
+const HOST            = process.env.HOST || "127.0.0.1";
 const API_TOKEN       = process.env.API_TOKEN || "";
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "http://localhost:5173,http://localhost:3000,http://localhost:3001").split(",").map(s => s.trim());
 const PRIVATE_KEY     = process.env.PRIVATE_KEY || "";
@@ -389,7 +393,14 @@ async function runScan() {
 // ── Polymarket WebSocket Relay ────────────────────────────────────────────────
 let wsReconnectDelay = 5000;
 
+// V2 cutover changed the WS endpoint and the legacy /ws path returns 404.
+// Until we verify the new path, allow operators to silence the noise via
+// POLY_WS_DISABLE=true in .env. The 60s scan loop is the source of truth
+// either way; the WS feed only powers sub-second dashboard updates.
+const WS_DISABLED = process.env.POLY_WS_DISABLE === "true";
+
 function connectPolyWs(tokenIds = []) {
+  if (WS_DISABLED) return;
   if (state.polyWs) { try { state.polyWs.close(); } catch {} }
   if (tokenIds.length === 0) return;
 
@@ -1099,8 +1110,8 @@ process.on("uncaughtException", (err) => {
 });
 
 // ── Start ────────────────────────────────────────────────────────────────────
-httpServer.listen(PORT, async () => {
-  log.info(`POLYTRACK v2.1.0 — http://localhost:${PORT}`);
+httpServer.listen(PORT, HOST, async () => {
+  log.info(`POLYTRACK v2.1.0 — listening on http://${HOST}:${PORT}`);
   log.info(`Auto-copy: ${state.autoEnabled ? "ON" : "OFF"} | Max trade: $${MAX_TRADE_USDC} | Slippage: ${SLIPPAGE_PCT}% | Threshold: ${MIN_WALLETS}+ ELITE | Interval: ${SCAN_INTERVAL}s`);
   log.info(`Private key: ${PRIVATE_KEY ? "SET" : "NOT SET (simulated)"} | Auth: ${API_TOKEN ? "SET" : "OPEN"} | CORS: ${ALLOWED_ORIGINS.join(", ")}`);
   if (!PRIVATE_KEY || !FUNDER_ADDRESS) {
