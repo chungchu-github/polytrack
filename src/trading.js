@@ -153,8 +153,10 @@ export function buildUnsignedOrder({
   signerAddress,
   funderAddress,
   tokenId,
-  price,           // retained for callers' logging convenience
-  maxUsdc,
+  price,           // USDC per token, used for both BUY and SELL math
+  side = 0,        // 0 = BUY (spend USDC for tokens), 1 = SELL (give tokens for USDC)
+  maxUsdc,         // BUY only — USDC budget the order may spend
+  tokenQty,        // SELL only — explicit token quantity to offer
   negRisk = false,
   builderCode,
   signatureType,
@@ -163,12 +165,23 @@ export function buildUnsignedOrder({
   if (!funderAddress) throw new Error("buildUnsignedOrder: funderAddress required");
   if (!tokenId)       throw new Error("buildUnsignedOrder: tokenId required");
   if (!(price > 0))   throw new Error("buildUnsignedOrder: price must be > 0");
-  if (!(maxUsdc > 0)) throw new Error("buildUnsignedOrder: maxUsdc must be > 0");
+  if (side !== 0 && side !== 1) throw new Error("buildUnsignedOrder: side must be 0 (BUY) or 1 (SELL)");
+
+  let makerAmount, takerAmount;
+  if (side === 0) {
+    // BUY — maker provides USDC, taker provides tokens
+    if (!(maxUsdc > 0)) throw new Error("buildUnsignedOrder: maxUsdc required for BUY");
+    const tokens = Math.floor(maxUsdc / price);
+    makerAmount = BigInt(Math.round(maxUsdc * 1e6));    // pUSD 6 decimals
+    takerAmount = BigInt(Math.round(tokens * 1e6));     // outcome tokens 6 decimals
+  } else {
+    // SELL — maker provides tokens, taker provides USDC
+    if (!(tokenQty > 0)) throw new Error("buildUnsignedOrder: tokenQty required for SELL");
+    makerAmount = BigInt(Math.round(tokenQty * 1e6));               // tokens we offer
+    takerAmount = BigInt(Math.round(tokenQty * price * 1e6));       // USDC we want
+  }
 
   const salt = BigInt("0x" + ethers.hexlify(ethers.randomBytes(8)).slice(2));
-  const tokenQty    = Math.floor(maxUsdc / price);
-  const makerAmount = BigInt(Math.round(maxUsdc * 1e6));    // pUSD 6 decimals
-  const takerAmount = BigInt(Math.round(tokenQty * 1e6));   // outcome tokens 6 decimals
   const builderBytes = builderCodeToBytes32(builderCode ?? BUILDER_CODE);
   const sigType = signatureType ?? getDefaultSignatureType();
 
@@ -179,7 +192,7 @@ export function buildUnsignedOrder({
     tokenId:       BigInt(tokenId),
     makerAmount,
     takerAmount,
-    side:          0,                     // 0 = BUY (signing payload uint8)
+    side,                                  // uint8 — 0 BUY, 1 SELL
     signatureType: sigType,
     timestamp:     BigInt(Date.now()),    // ms — replaces nonce for uniqueness
     metadata:      ZERO_BYTES32,
@@ -226,6 +239,66 @@ export function wrapOrderPayload({ orderData, signature, orderType = "FOK" }) {
     orderType,
   };
 }
+
+// ── Auto-Exit / Stop-Loss (P0 #4) ────────────────────────────────────────────
+
+/**
+ * Pure decision helper for the auto-exit cron. Inputs are deliberately small
+ * so the caller (server.js scan loop) can fan it out over many trades and
+ * the test suite can drive it deterministically.
+ *
+ * Inputs:
+ *   - trade:           { status, fillPrice, filledAt, exitedAt, direction }
+ *   - latestMidPrice:  number | null  (best_bid for the token, current scan)
+ *   - now:             ms timestamp (defaults to Date.now)
+ *   - policy:          { enabled, maxHoldDays, stopLossPct }
+ *                      stopLossPct is a positive fraction, e.g. 0.30 = -30%
+ *
+ * Returns:
+ *   { shouldExit: false }                                       — no action
+ *   { shouldExit: true, reason: "max_hold",  currentPnLPct }    — held too long
+ *   { shouldExit: true, reason: "stop_loss", currentPnLPct }    — moved against entry
+ *
+ * `currentPnLPct` is signed: positive = winning, negative = losing.
+ * Returned even when shouldExit=false (when computable) so callers can log
+ * mark-to-market PnL on every scan.
+ */
+export function evaluateExit({ trade, latestMidPrice, now = Date.now(), policy }) {
+  if (!policy?.enabled) return { shouldExit: false };
+
+  // Only act on positions we actually hold.
+  const open = (trade.status === "FILLED" || trade.status === "PARTIAL") && !trade.exitedAt;
+  if (!open) return { shouldExit: false };
+
+  // Time-based: hard ceiling on how long capital can be parked in one bet.
+  // Independent of price — even a winning trade we don't want sitting in a
+  // disputed Polymarket market for 6 months.
+  const maxAgeMs = (policy.maxHoldDays ?? 0) * 24 * 60 * 60 * 1000;
+  const filledAt = Number(trade.filledAt) || 0;
+  const age = filledAt > 0 ? now - filledAt : 0;
+
+  // Compute mark-to-market PnL when we have a fresh price; null otherwise.
+  let currentPnLPct = null;
+  if (latestMidPrice != null && trade.fillPrice > 0) {
+    currentPnLPct = (latestMidPrice - trade.fillPrice) / trade.fillPrice;
+  }
+
+  if (maxAgeMs > 0 && age >= maxAgeMs) {
+    return { shouldExit: true, reason: "max_hold", currentPnLPct };
+  }
+
+  // Loss-based: only fires when we have a fresh price and the loss exceeds
+  // the operator's threshold. Positive `stopLossPct` (e.g. 0.30) means
+  // "exit when down 30% from entry".
+  const stopLoss = Number(policy.stopLossPct) || 0;
+  if (stopLoss > 0 && currentPnLPct != null && currentPnLPct <= -stopLoss) {
+    return { shouldExit: true, reason: "stop_loss", currentPnLPct };
+  }
+
+  return { shouldExit: false, currentPnLPct };
+}
+
+// ── buildOrder ───────────────────────────────────────────────────────────────
 
 /**
  * Custodial convenience — unchanged public API. Composes the three primitives

@@ -20,7 +20,7 @@ import {
   buildOrder, buildUnsignedOrder, signOrder, wrapOrderPayload,
   getExchangeDomain, ORDER_TYPES,
   EXCHANGE_V2_ADDRESS, NEG_RISK_EXCHANGE_ADDRESS,
-  classifyClobOrderStatus,
+  classifyClobOrderStatus, evaluateExit,
 } from "../src/trading.js";
 
 const TEST_WALLET = ethers.Wallet.createRandom();
@@ -355,5 +355,225 @@ describe("classifyClobOrderStatus (reconciliation)", () => {
     assert.equal(classifyClobOrderStatus(undefined),   "UNKNOWN");
     assert.equal(classifyClobOrderStatus(""),          "UNKNOWN");
     assert.equal(classifyClobOrderStatus("moon_gas"),  "UNKNOWN");
+  });
+});
+
+// ── P0 #4 — SELL-side buildUnsignedOrder ─────────────────────────────────────
+
+describe("buildUnsignedOrder — SELL side", () => {
+  const TEST_SIGNER = TEST_WALLET.address;
+
+  it("builds a SELL order with maker=tokens, taker=USDC", () => {
+    const { orderData } = buildUnsignedOrder({
+      signerAddress: TEST_SIGNER,
+      funderAddress: TEST_FUNDER,
+      tokenId:       TEST_TOKEN_ID,
+      price:         0.40,
+      side:          1,        // SELL
+      tokenQty:      100,      // selling 100 tokens at $0.40 each → expect 40 USDC
+    });
+    assert.equal(orderData.side, 1);
+    // 100 tokens * 1e6 = 100_000_000
+    assert.equal(orderData.makerAmount, BigInt(100_000_000));
+    // 100 tokens * 0.40 USDC * 1e6 = 40_000_000
+    assert.equal(orderData.takerAmount, BigInt(40_000_000));
+  });
+
+  it("BUY default still works (no side specified → side 0)", () => {
+    const { orderData } = buildUnsignedOrder({
+      signerAddress: TEST_SIGNER,
+      funderAddress: TEST_FUNDER,
+      tokenId:       TEST_TOKEN_ID,
+      price:         0.50,
+      maxUsdc:       10,
+    });
+    assert.equal(orderData.side, 0);
+    // BUY: makerAmount = USDC (10 * 1e6), takerAmount = tokens (10/0.50 = 20 tokens * 1e6)
+    assert.equal(orderData.makerAmount, BigInt(10_000_000));
+    assert.equal(orderData.takerAmount, BigInt(20_000_000));
+  });
+
+  it("rejects SELL without tokenQty", () => {
+    assert.throws(() => buildUnsignedOrder({
+      signerAddress: TEST_SIGNER,
+      funderAddress: TEST_FUNDER,
+      tokenId:       TEST_TOKEN_ID,
+      price:         0.50,
+      side:          1,
+    }), /tokenQty required/);
+  });
+
+  it("rejects BUY without maxUsdc", () => {
+    assert.throws(() => buildUnsignedOrder({
+      signerAddress: TEST_SIGNER,
+      funderAddress: TEST_FUNDER,
+      tokenId:       TEST_TOKEN_ID,
+      price:         0.50,
+      side:          0,
+    }), /maxUsdc required/);
+  });
+
+  it("rejects invalid side", () => {
+    assert.throws(() => buildUnsignedOrder({
+      signerAddress: TEST_SIGNER,
+      funderAddress: TEST_FUNDER,
+      tokenId:       TEST_TOKEN_ID,
+      price:         0.50,
+      side:          2,
+      maxUsdc:       10,
+    }), /side must be 0/);
+  });
+
+  it("SELL serialises to side='SELL' in wire body", async () => {
+    const { orderData, domain } = buildUnsignedOrder({
+      signerAddress: TEST_SIGNER,
+      funderAddress: TEST_FUNDER,
+      tokenId:       TEST_TOKEN_ID,
+      price:         0.30,
+      side:          1,
+      tokenQty:      50,
+    });
+    const sig = await signOrder({
+      privateKey: TEST_WALLET.privateKey,
+      orderData,
+      domain,
+    });
+    const body = wrapOrderPayload({ orderData, signature: sig });
+    assert.equal(body.order.side, "SELL");
+    assert.equal(body.order.makerAmount, "50000000");
+    assert.equal(body.order.takerAmount, "15000000");  // 50 * 0.30 * 1e6
+  });
+});
+
+// ── P0 #4 — evaluateExit decision logic ──────────────────────────────────────
+
+describe("evaluateExit", () => {
+  const POLICY = { enabled: true, maxHoldDays: 14, stopLossPct: 0.30 };
+  const baseTrade = {
+    status:    "FILLED",
+    fillPrice: 0.50,
+    direction: "YES",
+    exitedAt:  null,
+  };
+  const dayMs = 24 * 60 * 60 * 1000;
+
+  it("returns shouldExit:false when policy is disabled", () => {
+    const r = evaluateExit({
+      trade:           { ...baseTrade, filledAt: 1000 },
+      latestMidPrice:  0.20,
+      now:             1000 + 30 * dayMs,
+      policy:          { ...POLICY, enabled: false },
+    });
+    assert.equal(r.shouldExit, false);
+  });
+
+  it("returns shouldExit:false on PENDING / unfilled trades", () => {
+    const r = evaluateExit({
+      trade:          { ...baseTrade, status: "PENDING", filledAt: null },
+      latestMidPrice: 0.20,
+      now:            Date.now(),
+      policy:         POLICY,
+    });
+    assert.equal(r.shouldExit, false);
+  });
+
+  it("returns shouldExit:false on already-exited trades", () => {
+    const r = evaluateExit({
+      trade:          { ...baseTrade, filledAt: 1000, exitedAt: 1500 },
+      latestMidPrice: 0.20,
+      now:            1000 + 30 * dayMs,
+      policy:         POLICY,
+    });
+    assert.equal(r.shouldExit, false);
+  });
+
+  it("triggers max_hold when age exceeds maxHoldDays", () => {
+    const filledAt = 1000;
+    const r = evaluateExit({
+      trade:          { ...baseTrade, filledAt },
+      latestMidPrice: 0.45,            // small loss, but not stop-loss
+      now:            filledAt + 15 * dayMs,
+      policy:         POLICY,
+    });
+    assert.equal(r.shouldExit, true);
+    assert.equal(r.reason,     "max_hold");
+  });
+
+  it("triggers stop_loss when price drops past threshold", () => {
+    const filledAt = Date.now() - 1 * dayMs;
+    const r = evaluateExit({
+      trade:          { ...baseTrade, filledAt },
+      latestMidPrice: 0.30,            // entry 0.50 → -40%
+      policy:         POLICY,
+    });
+    assert.equal(r.shouldExit, true);
+    assert.equal(r.reason,     "stop_loss");
+    assert.ok(r.currentPnLPct < -0.30);
+  });
+
+  it("does not trigger stop_loss above threshold", () => {
+    const filledAt = Date.now() - 1 * dayMs;
+    const r = evaluateExit({
+      trade:          { ...baseTrade, filledAt },
+      latestMidPrice: 0.40,            // entry 0.50 → -20%, above -30% threshold
+      policy:         POLICY,
+    });
+    assert.equal(r.shouldExit, false);
+    assert.ok(Math.abs(r.currentPnLPct + 0.20) < 1e-9);
+  });
+
+  it("computes positive currentPnLPct for winning positions", () => {
+    const filledAt = Date.now() - 1 * dayMs;
+    const r = evaluateExit({
+      trade:          { ...baseTrade, filledAt },
+      latestMidPrice: 0.70,            // up 40%
+      policy:         POLICY,
+    });
+    assert.equal(r.shouldExit, false);
+    assert.ok(Math.abs(r.currentPnLPct - 0.40) < 1e-9);
+  });
+
+  it("max_hold takes priority over stop_loss", () => {
+    const filledAt = 1000;
+    const r = evaluateExit({
+      trade:          { ...baseTrade, filledAt },
+      latestMidPrice: 0.10,            // also stop-loss eligible
+      now:            filledAt + 30 * dayMs,
+      policy:         POLICY,
+    });
+    assert.equal(r.shouldExit, true);
+    assert.equal(r.reason,     "max_hold");  // time check first
+  });
+
+  it("does nothing with no fresh price and within time horizon", () => {
+    const filledAt = Date.now() - 5 * dayMs;
+    const r = evaluateExit({
+      trade:          { ...baseTrade, filledAt },
+      latestMidPrice: null,
+      policy:         POLICY,
+    });
+    assert.equal(r.shouldExit, false);
+    assert.equal(r.currentPnLPct, null);
+  });
+
+  it("maxHoldDays=0 disables time-based exit", () => {
+    const filledAt = 1000;
+    const r = evaluateExit({
+      trade:          { ...baseTrade, filledAt },
+      latestMidPrice: 0.45,
+      now:            filledAt + 365 * dayMs,
+      policy:         { ...POLICY, maxHoldDays: 0 },
+    });
+    assert.equal(r.shouldExit, false);
+  });
+
+  it("stopLossPct=0 disables loss-based exit", () => {
+    const filledAt = Date.now() - 1 * dayMs;
+    const r = evaluateExit({
+      trade:          { ...baseTrade, filledAt },
+      latestMidPrice: 0.10,            // crashed to 20% of entry
+      policy:         { ...POLICY, stopLossPct: 0 },
+    });
+    assert.equal(r.shouldExit, false);
   });
 });

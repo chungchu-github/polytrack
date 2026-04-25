@@ -27,8 +27,8 @@ import { loadConfig, saveConfig } from "./config.js";
 import { scoreWallet } from "./scoring.js";
 import {
   executeCopyTrade, resolveTokenId, preflightCheck,
-  buildUnsignedOrder, wrapOrderPayload,
-  classifyClobOrderStatus,
+  buildUnsignedOrder, signOrder, wrapOrderPayload,
+  classifyClobOrderStatus, evaluateExit,
 } from "./trading.js";
 import { checkResolutions, getSignalAccuracy } from "./resolution.js";
 import { checkRiskLimits, getRiskSnapshot } from "./risk.js";
@@ -43,6 +43,7 @@ import {
 import {
   initDB, closeDB, getStats as getDBStats, getStalePendingTrades,
   updateTradeStatus, getDataCaptureStats, vacuumDB,
+  getOpenFilledTrades, markTradeExited, getLatestSnapshotForToken,
 } from "./db.js";
 import log, { logger } from "./logger.js";
 import { initMonitoring, captureException, flushMonitoring } from "./monitoring.js";
@@ -61,6 +62,7 @@ import {
   hashPassword, verifyPassword, signJwt, verifyJwt, getJwtSecret,
   generateInviteToken, inviteExpiry,
 } from "./auth.js";
+import { ethers } from "ethers";
 
 dotenv.config();
 
@@ -1168,11 +1170,96 @@ async function sweepStaleOrders() {
   }
 }
 
+// ── Auto-Exit / Stop-Loss (P0 #4) ─────────────────────────────────────────────
+// For every FILLED trade with no exitedAt: check policy. If we should exit,
+// build a SELL order at the latest best_bid and submit it. Marks the trade
+// EXITED in the DB regardless of fill outcome — the SELL has an order_id we
+// can reconcile later if the FOK didn't take.
+//
+// Disabled by default (config.exitPolicy.enabled=false). Operator must opt
+// in once they're confident in the SELL signing path. Until then, this
+// function is a no-op.
+async function runExits() {
+  const cfg = loadConfig();
+  const policy = cfg.exitPolicy;
+  if (!policy?.enabled) return;
+  if (!PRIVATE_KEY || !FUNDER_ADDRESS) return;  // simulation mode — never sell
+
+  const open = getOpenFilledTrades();
+  if (open.length === 0) return;
+  const now = Date.now();
+
+  for (const t of open) {
+    const tokenId = t.token_id;
+    const fillSize = Number(t.fill_size) || 0;
+    if (!tokenId || !(fillSize > 0)) {
+      // Pre-V9 trades or partial DB writes — can't sell what we don't track.
+      continue;
+    }
+
+    const snap = getLatestSnapshotForToken(tokenId);
+    const latestMidPrice = snap?.mid_price ?? null;
+
+    const decision = evaluateExit({
+      trade: {
+        status:    t.status,
+        fillPrice: Number(t.fill_price) || Number(t.limit_price) || null,
+        filledAt:  Number(t.filled_at) || 0,
+        exitedAt:  t.exited_at,
+        direction: t.direction,
+      },
+      latestMidPrice,
+      now,
+      policy,
+    });
+    if (!decision.shouldExit) continue;
+
+    const exitPrice = snap?.best_bid ?? snap?.mid_price;
+    if (!(exitPrice > 0)) {
+      log.warn(`Auto-exit #${t.id} skipped — no fresh bid for ${tokenId.slice(0, 10)}…`);
+      continue;
+    }
+
+    try {
+      const signerAddress = new ethers.Wallet(PRIVATE_KEY).address;
+      const { orderData, domain } = buildUnsignedOrder({
+        signerAddress,
+        funderAddress: FUNDER_ADDRESS,
+        tokenId,
+        price:    exitPrice,
+        side:     1,             // SELL
+        tokenQty: fillSize,
+        negRisk:  false,         // TODO: persist negRisk on the trade row
+      });
+      const signature = await signOrder({ privateKey: PRIVATE_KEY, orderData, domain });
+      const payload = wrapOrderPayload({ orderData, signature, orderType: "FOK" });
+      const submission = await submitOrder(payload, {});
+
+      const exitOrderId = submission?.data?.orderID || submission?.data?.id || null;
+      markTradeExited(t.id, {
+        exitReason:  decision.reason,
+        exitPrice,
+        exitOrderId,
+      });
+      const pnlStr = decision.currentPnLPct == null
+        ? "n/a"
+        : `${(decision.currentPnLPct * 100).toFixed(1)}%`;
+      log.info(`Auto-exit #${t.id} (${decision.reason}) — ${t.direction} sold at ${exitPrice}, M2M PnL ${pnlStr}`);
+    } catch (e) {
+      log.warn(`Auto-exit #${t.id} failed: ${e.message}`);
+    }
+  }
+}
+
 // ── Scheduled Scan ───────────────────────────────────────────────────────────
 cron.schedule(`*/${SCAN_INTERVAL} * * * * *`, () => {
   if (state.wallets.size > 0 && !state.scanning) {
     log.scan("Scheduled refresh scan…");
-    runScan();
+    runScan().then(() => runExits()).catch(() => {});
+  } else {
+    // Even when there's nothing to scan, still evaluate exits — held
+    // positions don't care about new market data, only time + price drift.
+    runExits().catch(() => {});
   }
 });
 
