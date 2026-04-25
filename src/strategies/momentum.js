@@ -7,6 +7,7 @@
  * trend. Requires F0.5 data capture to have accumulated ≥2 snapshots.
  */
 import { BaseStrategy } from "./base.js";
+import { isSentinelSnap } from "./util.js";
 
 export class MomentumStrategy extends BaseStrategy {
   defaults() {
@@ -33,7 +34,12 @@ export class MomentumStrategy extends BaseStrategy {
 
         // Use the primary token (first snapshot's token_id) for trend
         const tokenId = snaps[0].token_id;
-        const series = snaps.filter(s => s.token_id === tokenId && s.mid_price != null);
+        // Drop sentinel snapshots — placeholder pricing (bid=0.01/ask=0.99,
+        // mid stuck at 0.5) creates phantom moves the moment a real bid
+        // appears. See src/strategies/util.js for the bug history.
+        const series = snaps.filter(s =>
+          s.token_id === tokenId && s.mid_price != null && !isSentinelSnap(s)
+        );
         if (series.length < 2) continue;
 
         const firstVol = Number(series[series.length - 1].volume_24h) || Number(snaps[0].volume_24h) || 0;
