@@ -191,7 +191,10 @@ export function normaliseMarket(m = {}) {
  * `normaliseMarket` rebuilds the synthetic `tokens: [{token_id, outcome, price}]`
  * shape so downstream consumers don't know Gamma changed.
  */
-export async function fetchMarkets({ limit = 20 } = {}) {
+// Default bumped from 20 → 100 (PR liquid-filter): event-level volume_24hr
+// rank doesn't predict whether outcome tokens have real orderbooks today,
+// so we over-fetch and let filterLiquidMarkets drop the placeholder events.
+export async function fetchMarkets({ limit = 100 } = {}) {
   const events = await apiFetch(
     `${GAMMA_API}/events?active=true&closed=false&order=volume_24hr&ascending=false&limit=${limit}`
   );
