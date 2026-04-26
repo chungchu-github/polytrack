@@ -51,7 +51,7 @@ import { initMonitoring, captureException, flushMonitoring } from "./monitoring.
 import { checkClockSkew } from "./time-check.js";
 import { captureMarketSnapshot, captureWalletPositions, pruneOldSnapshots } from "./datacapture.js";
 import { HistoryReader } from "./backtest/history.js";
-import { filterLiquidMarkets } from "./strategies/util.js";
+import { filterLiquidMarkets, filterByLastTradePrice } from "./strategies/util.js";
 import { runBacktest } from "./backtest/engine.js";
 import {
   insertBacktest, completeBacktest, getBacktest, listBacktests, deleteBacktest,
@@ -450,9 +450,14 @@ async function runScan() {
       log.warn(`Data capture failed: ${e.message}`);
     }
 
-    // 3. Filter to liquid markets only — drops sentinel/no-orderbook events
-    //    so momentum/meanrev/arbitrage all see the same actionable subset.
-    const filtered = filterLiquidMarkets(fetched, capByToken, { cap: 30 });
+    // 3. Filter to tradeable markets by lastTradePrice. The /book-based
+    //    filter (filterLiquidMarkets) was the wrong signal — Polymarket's
+    //    visible orderbook is mostly noise; trades execute via hidden
+    //    liquidity at meaningful prices that ONLY show up in the metadata's
+    //    lastTradePrice field. Live diagnosis (2026-04-26): book showed
+    //    0.01/0.99 sentinel, but lastTradePrice was 0.44 / 0.24 / 0.5 etc
+    //    on the same markets — those are real, tradeable prices.
+    const filtered = filterByLastTradePrice(fetched, { cap: 30 });
     state.markets = filtered.events;
     state.lastMarketFilter = {
       ...filtered.stats,

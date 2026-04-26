@@ -123,14 +123,14 @@ export class SignalStore {
           // If price has drifted up by more than maxEntryDrift cents,
           // skip — we'd be chasing past the smart-money edge.
           //
-          // Skipped silently when no history reader is supplied (e.g. older
-          // /scan?quick paths) or no recent snapshot exists.
+          // currentPrice is read from market.lastTradePrice / outcomePrices,
+          // NOT from snapshot.mid_price. Polymarket's /book-derived
+          // mid_price is noise (sentinel 0.5 even on actively-traded
+          // markets); the metadata's lastTradePrice IS the true mark.
           const entryAnalysis = analyseEntryEdge({
             aligned,
-            tokens: m.tokens,
+            market: m,
             direction: dir,
-            history,
-            now,
             maxDrift: cfg.maxEntryDrift,
           });
           if (entryAnalysis.skip) {
@@ -299,28 +299,32 @@ function calcStrength(aligned, allElites, directions) {
  * Decide whether a consensus signal should fire based on how far the current
  * market price has drifted above the ELITE wallets' weighted-average entry.
  *
+ * Reads currentPrice from the market metadata (`lastTradePrice` /
+ * `outcomePrices`), NOT from orderbook snapshots. Polymarket's /book is
+ * mostly sentinel noise; lastTradePrice is the true recent mark.
+ *
  * Returns:
  *   { skip: false, eliteAvgEntry, currentPrice, entryEdge }
  *     — proceed; surface the prices on the signal payload
  *   { skip: true, reason, ...prices }
  *     — drop the signal; reason is one of:
  *         "drift-exceeded"  → currentPrice > entry + maxDrift (chasing)
- *         "no-history"      → no HistoryReader passed (legacy callers)
- *         "no-snapshot"     → token had no recent mid-price observation
+ *         "no-market"       → market metadata not supplied (legacy)
+ *         "no-price"        → market lacks a usable lastTradePrice
  *         "no-entry"        → ELITE positions had no avgPrice (data gap)
  *
- * "no-history" / "no-snapshot" / "no-entry" all return skip=false to preserve
- * legacy behaviour — the filter only ACTIVELY rejects when it has full data.
+ * Non-rejection cases preserve legacy "let through" behaviour so we don't
+ * block consensus on missing data.
  *
- * Direction-symmetric: works on whichever outcome's price is being signalled.
- * For YES we want the YES token's price; for NO we want the NO token's.
+ * Direction-symmetric: derives the directional price from the binary-market
+ * convention (outcomePrices[0]=YES, [1]=NO; or lastTradePrice ≈ YES, with
+ * NO ≈ 1 − lastTradePrice as fallback).
  */
-export function analyseEntryEdge({ aligned, tokens, direction, history, now, maxDrift }) {
+export function analyseEntryEdge({ aligned, market, direction, maxDrift }) {
   if (!Array.isArray(aligned) || aligned.length === 0) {
     return { skip: false, reason: "no-aligned" };
   }
   // Weighted-average entry across the aligned ELITE wallets.
-  // Weight by capped position value (same weight already on the row).
   let totalW = 0, weightedSum = 0;
   for (const a of aligned) {
     const p = Number(a.avgPrice);
@@ -331,32 +335,21 @@ export function analyseEntryEdge({ aligned, tokens, direction, history, now, max
     weightedSum += p * w;
   }
   if (totalW === 0) {
-    // ELITE positions don't have avgPrice — can't compute drift. Pass through
-    // (legacy behaviour) rather than block on missing data.
     return { skip: false, reason: "no-entry" };
   }
   const eliteAvgEntry = weightedSum / totalW;
 
-  // Current price — needs HistoryReader and a recent snapshot.
-  if (!history || typeof history.getMarketAt !== "function") {
-    return { skip: false, reason: "no-history", eliteAvgEntry };
+  if (!market) {
+    return { skip: false, reason: "no-market", eliteAvgEntry };
   }
-  // Pick the token matching the signalled direction. Token list comes from
-  // normaliseMarket, which puts outcomes in their listed order. We accept
-  // either explicit `outcome` field or fall back to YES=index0 / NO=index1.
-  const targetToken = pickTokenForDirection(tokens, direction);
-  if (!targetToken) {
-    return { skip: false, reason: "no-token", eliteAvgEntry };
+
+  const currentPrice = pickCurrentPriceForDirection(market, direction);
+  if (currentPrice == null) {
+    return { skip: false, reason: "no-price", eliteAvgEntry };
   }
-  const snap = history.getMarketAt(targetToken, now);
-  if (!snap || snap.mid_price == null) {
-    return { skip: false, reason: "no-snapshot", eliteAvgEntry };
-  }
-  const currentPrice = Number(snap.mid_price);
+
   const entryEdge = currentPrice - eliteAvgEntry;
 
-  // Drift exceeded → reject. Negative drift (we'd buy cheaper than ELITE)
-  // is always fine — actually a better deal than they got.
   if (Number.isFinite(maxDrift) && entryEdge > maxDrift) {
     return {
       skip: true, reason: "drift-exceeded",
@@ -366,18 +359,44 @@ export function analyseEntryEdge({ aligned, tokens, direction, history, now, max
   return { skip: false, eliteAvgEntry, currentPrice, entryEdge };
 }
 
-function pickTokenForDirection(tokens, direction) {
-  if (!Array.isArray(tokens) || tokens.length === 0) return null;
-  // Prefer explicit outcome match
+/**
+ * Pull the directional price (YES side or NO side) from a market's
+ * metadata. Prefer outcomePrices[] when present (it's per-outcome and
+ * fresh). Fall back to lastTradePrice (assumed YES; NO = 1 - that).
+ *
+ * Returns null when no usable price is available.
+ */
+// "Usable" price range matches filterByLastTradePrice's default threshold
+// (0.02 / 0.98). Markets at the extremes are effectively resolved and
+// shouldn't drive entry-edge math even if they slip past the upstream filter.
+const USABLE_LO = 0.02;
+const USABLE_HI = 0.98;
+function isUsablePrice(p) {
+  return Number.isFinite(p) && p > USABLE_LO && p < USABLE_HI;
+}
+
+function pickCurrentPriceForDirection(market, direction) {
   const want = String(direction).toUpperCase();
-  for (const t of tokens) {
-    const out = String(t?.outcome || "").toUpperCase();
-    if (out === want) return t.token_id || t.tokenId || t;
+  // Per-outcome prices (preferred — direction-correct by construction)
+  const prices = Array.isArray(market.outcomePrices) ? market.outcomePrices : [];
+  const outcomes = Array.isArray(market.outcomes) ? market.outcomes : [];
+  // Match by outcome label first
+  for (let i = 0; i < outcomes.length && i < prices.length; i++) {
+    if (String(outcomes[i] || "").toUpperCase() === want) {
+      const p = Number(prices[i]);
+      if (isUsablePrice(p)) return p;
+    }
   }
-  // Fallback: index 0 = YES, index 1 = NO (Polymarket convention)
+  // Fall back to index convention: 0 = YES, 1 = NO
   const idx = want === "YES" ? 0 : 1;
-  const t = tokens[idx] || tokens[0];
-  return t?.token_id || t?.tokenId || t;
+  const idxPrice = Number(prices[idx]);
+  if (isUsablePrice(idxPrice)) return idxPrice;
+  // Last resort: lastTradePrice (assume YES; flip for NO)
+  const ltp = Number(market.lastTradePrice);
+  if (isUsablePrice(ltp)) {
+    return want === "YES" ? ltp : (1 - ltp);
+  }
+  return null;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
