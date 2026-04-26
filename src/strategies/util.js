@@ -60,6 +60,57 @@ function bookHasRealLiquidity(book, opts = {}) {
 }
 
 /**
+ * Filter events by `lastTradePrice` — the actual signal of "tradeable" on
+ * Polymarket. This replaced the orderbook-based filter (filterLiquidMarkets
+ * below) for non-arbitrage strategies after live diagnosis revealed
+ * Polymarket's visible /book endpoint returns mostly noise: trades execute
+ * at meaningful prices like 0.44 / 0.24 even when the orderbook shows
+ * 0.01/0.99 placeholder. The hidden-liquidity matching path doesn't show
+ * up in /book.
+ *
+ * Real signal of "this market trades right now":
+ *   - lastTradePrice exists and is in (minLastTrade, 1 - minLastTrade)
+ *   - i.e. not stuck at extremes (resolved-ish) and not null (never traded)
+ *
+ * For arbitrage we still need both-leg orderbook depth, so the original
+ * orderbook-based filterLiquidMarkets stays exported for that use case.
+ *
+ * @param {Array} events    fetchMarkets() / fetchMarketsByConditionIds() output
+ * @param {object} [opts]   { minLastTrade?: number, cap?: number }
+ * @returns {{events: Array, stats: {fetched, liquid, used, dropped}}}
+ */
+export function filterByLastTradePrice(events, opts = {}) {
+  const { minLastTrade = 0.02, cap = 30 } = opts;
+  const fetched = (events || []).length;
+  const liquid = [];
+  const upper = 1 - minLastTrade;
+
+  for (const evt of events || []) {
+    let hasOneTradeable = false;
+    for (const m of evt.markets || []) {
+      const ltp = Number(m?.lastTradePrice);
+      if (!Number.isFinite(ltp) || ltp <= 0) continue;
+      if (ltp <= minLastTrade) continue;        // resolved-ish NO / dead
+      if (ltp >= upper) continue;               // resolved-ish YES / dead
+      hasOneTradeable = true;
+      break;
+    }
+    if (hasOneTradeable) liquid.push(evt);
+  }
+
+  const used = liquid.slice(0, cap);
+  return {
+    events: used,
+    stats: {
+      fetched,
+      liquid: liquid.length,
+      used: used.length,
+      dropped: fetched - liquid.length,
+    },
+  };
+}
+
+/**
  * Filter event list down to events whose outcome tokens have real, tradeable
  * liquidity right now. An event passes if AT LEAST ONE of its outcome tokens
  * has a non-sentinel orderbook in `byToken`. We don't require all outcomes
@@ -73,6 +124,11 @@ function bookHasRealLiquidity(book, opts = {}) {
  * dead outcomes, which produced 45 phantom strength=100 arbitrage signals
  * in production. This pre-filter prevents strategies from ever seeing
  * those events.
+ *
+ * NOTE (2026-04-26): superseded by filterByLastTradePrice for non-arbitrage
+ * use. Live diagnosis showed Polymarket /book is misleading — trades execute
+ * via hidden liquidity at meaningful prices while the visible book stays
+ * 0.01/0.99. Keep this for arbitrage which still needs both-leg book depth.
  *
  * @param {Array} events     fetchMarkets() output (events with .markets[].tokens[])
  * @param {Map}   byToken    tokenId → orderbook from fetchOrderBooks()

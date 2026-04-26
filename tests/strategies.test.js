@@ -375,8 +375,70 @@ describe("StrategyEngine", () => {
   });
 });
 
-// ── filterLiquidMarkets (PR liquid-filter) ──────────────────────────────────
-import { filterLiquidMarkets } from "../src/strategies/util.js";
+// ── filterLiquidMarkets + filterByLastTradePrice ────────────────────────────
+import { filterLiquidMarkets, filterByLastTradePrice } from "../src/strategies/util.js";
+
+describe("filterByLastTradePrice", () => {
+  // Polymarket-shape market metadata
+  const ev = (id, lastTradePrice) => ({
+    id,
+    markets: [{ conditionId: `c${id}`, lastTradePrice }],
+  });
+
+  it("keeps events with lastTradePrice in tradeable range", () => {
+    const events = [ev(1, 0.45), ev(2, 0.20), ev(3, 0.85)];
+    const r = filterByLastTradePrice(events);
+    assert.equal(r.events.length, 3);
+    assert.equal(r.stats.dropped, 0);
+  });
+
+  it("drops events at extremes (≤ 0.02 / ≥ 0.98)", () => {
+    const events = [
+      ev(1, 0.001),    // resolved-ish NO
+      ev(2, 0.999),    // resolved-ish YES
+      ev(3, 0.50),     // tradeable
+    ];
+    const r = filterByLastTradePrice(events);
+    assert.equal(r.events.length, 1);
+    assert.equal(r.stats.dropped, 2);
+  });
+
+  it("drops events with null/missing lastTradePrice", () => {
+    const events = [
+      { id: 1, markets: [{ conditionId: "x" }] },             // missing
+      { id: 2, markets: [{ conditionId: "y", lastTradePrice: null }] },
+      ev(3, 0.50),
+    ];
+    const r = filterByLastTradePrice(events);
+    assert.equal(r.events.length, 1);
+  });
+
+  it("respects custom minLastTrade threshold", () => {
+    const events = [ev(1, 0.04), ev(2, 0.06)];
+    const r = filterByLastTradePrice(events, { minLastTrade: 0.05 });
+    assert.equal(r.events.length, 1);
+    assert.equal(r.events[0].id, 2);
+  });
+
+  it("caps at requested limit", () => {
+    const events = Array.from({ length: 10 }, (_, i) => ev(i, 0.50));
+    const r = filterByLastTradePrice(events, { cap: 3 });
+    assert.equal(r.events.length, 3);
+    assert.equal(r.stats.liquid, 10);
+  });
+
+  it("multi-market event passes if ANY market is tradeable", () => {
+    const e = {
+      id: "multi",
+      markets: [
+        { conditionId: "a", lastTradePrice: 0.001 },   // dead
+        { conditionId: "b", lastTradePrice: 0.45  },   // tradeable
+      ],
+    };
+    const r = filterByLastTradePrice([e]);
+    assert.equal(r.events.length, 1);
+  });
+});
 
 describe("filterLiquidMarkets", () => {
   // Helpers — Polymarket API book shape: { bids: [{price,size}], asks: [{price,size}] }

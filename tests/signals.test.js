@@ -33,14 +33,34 @@ function market(conditionId, question = "Will X happen?") {
   };
 }
 
-// Minimal HistoryReader fake — only `getMarketAt` is exercised by analyseEntryEdge.
-function fakeHistory(midByToken) {
+// Build a market metadata object the way Polymarket /markets returns one.
+// PR liquidity-via-lasttradeprice: analyseEntryEdge reads price from
+// market.outcomePrices / lastTradePrice rather than snapshot.mid_price.
+function marketMeta(yesPrice, conditionId = "CID-X") {
   return {
-    getMarketAt(tokenId /*, t, windowMs */) {
-      if (midByToken[tokenId] == null) return null;
-      return { mid_price: midByToken[tokenId], best_bid: midByToken[tokenId] - 0.01,
-               best_ask: midByToken[tokenId] + 0.01, timestamp: Date.now() };
-    },
+    conditionId,
+    outcomes:      ["Yes", "No"],
+    outcomePrices: [yesPrice, 1 - yesPrice],
+    lastTradePrice: yesPrice,
+  };
+}
+
+// Updated detect() helper: consensus reads market metadata directly off the
+// markets[].markets[] objects, so tests build a fake event with a single
+// market carrying outcomePrices.
+function marketWithPrice(conditionId, yesPrice, question = "Will X happen?") {
+  return {
+    title: question,
+    markets: [{
+      conditionId, question,
+      tokens: [
+        { token_id: `${conditionId}-YES`, outcome: "Yes" },
+        { token_id: `${conditionId}-NO`,  outcome: "No"  },
+      ],
+      outcomes:      ["Yes", "No"],
+      outcomePrices: [yesPrice, 1 - yesPrice],
+      lastTradePrice: yesPrice,
+    }],
   };
 }
 
@@ -194,65 +214,76 @@ describe("analyseEntryEdge", () => {
   ];
   // Weighted avg: (0.40*0.5 + 0.50*0.3) / 0.8 = 0.4375
 
-  const tokens = [
-    { token_id: "TOK-YES", outcome: "Yes" },
-    { token_id: "TOK-NO",  outcome: "No"  },
-  ];
-
-  it("passes through when no history is supplied (legacy callers)", () => {
-    const r = analyseEntryEdge({ aligned, tokens, direction: "YES",
-      history: null, now: Date.now(), maxDrift: 0.15 });
+  it("passes through when no market metadata is supplied", () => {
+    const r = analyseEntryEdge({ aligned, market: null, direction: "YES", maxDrift: 0.15 });
     assert.equal(r.skip, false);
-    assert.equal(r.reason, "no-history");
+    assert.equal(r.reason, "no-market");
     assert.ok(Math.abs(r.eliteAvgEntry - 0.4375) < 1e-9);
   });
 
   it("rejects when current price has drifted ABOVE entry by > maxDrift", () => {
-    const history = fakeHistory({ "TOK-YES": 0.65 });   // drift = +0.2125
-    const r = analyseEntryEdge({ aligned, tokens, direction: "YES",
-      history, now: Date.now(), maxDrift: 0.15 });
+    // YES at 0.65 → drift = +0.2125 from 0.4375 entry
+    const r = analyseEntryEdge({ aligned, market: marketMeta(0.65), direction: "YES", maxDrift: 0.15 });
     assert.equal(r.skip, true);
     assert.equal(r.reason, "drift-exceeded");
     assert.ok(r.entryEdge > 0.15);
   });
 
-  it("keeps signal when current price is within drift band above entry", () => {
-    const history = fakeHistory({ "TOK-YES": 0.50 });   // drift = +0.0625
-    const r = analyseEntryEdge({ aligned, tokens, direction: "YES",
-      history, now: Date.now(), maxDrift: 0.15 });
+  it("keeps signal when within drift band above entry", () => {
+    // YES at 0.50 → drift = +0.0625
+    const r = analyseEntryEdge({ aligned, market: marketMeta(0.50), direction: "YES", maxDrift: 0.15 });
     assert.equal(r.skip, false);
     assert.ok(r.entryEdge > 0 && r.entryEdge < 0.15);
   });
 
   it("keeps signal when current price is BELOW entry (cheaper than ELITE got in)", () => {
-    const history = fakeHistory({ "TOK-YES": 0.30 });   // drift = -0.1375
-    const r = analyseEntryEdge({ aligned, tokens, direction: "YES",
-      history, now: Date.now(), maxDrift: 0.15 });
+    const r = analyseEntryEdge({ aligned, market: marketMeta(0.30), direction: "YES", maxDrift: 0.15 });
     assert.equal(r.skip, false);
     assert.ok(r.entryEdge < 0);
   });
 
-  it("uses NO token price for NO-direction signals", () => {
-    const history = fakeHistory({ "TOK-NO": 0.70 });    // NO drift = +0.2625
-    const r = analyseEntryEdge({ aligned, tokens, direction: "NO",
-      history, now: Date.now(), maxDrift: 0.15 });
+  it("uses NO outcomePrice for NO-direction signals", () => {
+    // YES at 0.30 means NO at 0.70 → drift = +0.2625 from 0.4375
+    const r = analyseEntryEdge({ aligned, market: marketMeta(0.30), direction: "NO", maxDrift: 0.15 });
     assert.equal(r.skip, true);
-    assert.equal(r.currentPrice, 0.70);
+    assert.ok(Math.abs(r.currentPrice - 0.70) < 1e-9);
   });
 
-  it("passes through when token has no recent snapshot", () => {
-    const history = fakeHistory({});                    // empty
-    const r = analyseEntryEdge({ aligned, tokens, direction: "YES",
-      history, now: Date.now(), maxDrift: 0.15 });
+  it("falls back to lastTradePrice when outcomePrices is missing", () => {
+    const m = { conditionId: "X", lastTradePrice: 0.55 };   // no outcomePrices
+    const r = analyseEntryEdge({ aligned, market: m, direction: "YES", maxDrift: 0.15 });
     assert.equal(r.skip, false);
-    assert.equal(r.reason, "no-snapshot");
+    assert.equal(r.currentPrice, 0.55);
+  });
+
+  it("for NO direction, lastTradePrice fallback flips to 1 - ltp", () => {
+    const m = { conditionId: "X", lastTradePrice: 0.30 };
+    const r = analyseEntryEdge({ aligned, market: m, direction: "NO", maxDrift: 0.15 });
+    assert.equal(r.skip, true);
+    assert.ok(Math.abs(r.currentPrice - 0.70) < 1e-9);
+  });
+
+  it("passes through when market has no usable price (extremes / null)", () => {
+    const r1 = analyseEntryEdge({
+      aligned,
+      market: { conditionId: "X", outcomePrices: [0.999, 0.001] },   // extreme
+      direction: "YES", maxDrift: 0.15,
+    });
+    assert.equal(r1.skip, false);
+    assert.equal(r1.reason, "no-price");
+
+    const r2 = analyseEntryEdge({
+      aligned,
+      market: { conditionId: "X" },                                  // no fields
+      direction: "YES", maxDrift: 0.15,
+    });
+    assert.equal(r2.skip, false);
+    assert.equal(r2.reason, "no-price");
   });
 
   it("passes through when ELITE positions lack avgPrice (data gap)", () => {
     const noPrice = [{ addr: "0x1", weight: 0.5, avgPrice: null, posValue: 5000 }];
-    const history = fakeHistory({ "TOK-YES": 0.99 });   // would normally fail
-    const r = analyseEntryEdge({ aligned: noPrice, tokens, direction: "YES",
-      history, now: Date.now(), maxDrift: 0.15 });
+    const r = analyseEntryEdge({ aligned: noPrice, market: marketMeta(0.99), direction: "YES", maxDrift: 0.15 });
     assert.equal(r.skip, false);
     assert.equal(r.reason, "no-entry");
   });
@@ -262,13 +293,11 @@ describe("signals — entry-edge integration", () => {
   it("filters out signal when current price already pumped past ELITE entry", () => {
     const store = new SignalStore({ maxEntryDrift: 0.15 });
     const wallets = [
-      // Both ELITE entered at 0.40
       wallet("0x1", [pos("CID-A", "Yes", 5000, 0.40)]),
       wallet("0x2", [pos("CID-A", "Yes", 5000, 0.40)]),
     ];
-    // Current YES price is 0.70 — drift = +0.30 > 0.15
-    const history = fakeHistory({ "CID-A-YES": 0.70 });
-    const sigs = store.detect(wallets, [market("CID-A")], history);
+    // YES at 0.70 — drift = +0.30 > 0.15
+    const sigs = store.detect(wallets, [marketWithPrice("CID-A", 0.70)]);
     assert.equal(sigs.length, 0);
     assert.equal(store.lastSkippedByEdge.length, 1);
     assert.equal(store.lastSkippedByEdge[0].reason, "drift-exceeded");
@@ -280,8 +309,7 @@ describe("signals — entry-edge integration", () => {
       wallet("0x1", [pos("CID-A", "Yes", 5000, 0.40)]),
       wallet("0x2", [pos("CID-A", "Yes", 5000, 0.40)]),
     ];
-    const history = fakeHistory({ "CID-A-YES": 0.50 });   // drift = +0.10
-    const sigs = store.detect(wallets, [market("CID-A")], history);
+    const sigs = store.detect(wallets, [marketWithPrice("CID-A", 0.50)]);
     assert.equal(sigs.length, 1);
     assert.equal(sigs[0].eliteAvgEntry, 0.40);
     assert.equal(sigs[0].currentPrice, 0.50);
