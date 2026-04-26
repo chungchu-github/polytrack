@@ -452,6 +452,55 @@ export function getPositionHistory(walletAddress, sinceMs = 0, untilMs = Date.no
   ).all(walletAddress, sinceMs, untilMs);
 }
 
+/**
+ * Latest position snapshot per (wallet, condition_id, outcome) for the
+ * given wallet addresses. Used by hydrateFromDB to restore positions after
+ * server restart so the first-scan-after-restart can already feed
+ * trackedCidsConsidered to market discovery (without this, it sits at 0
+ * for one full scan cycle while loadWallet repopulates).
+ *
+ * Returns a Map<walletAddress, position[]> where each position is the
+ * last-seen snapshot's data shaped like wallet.positions[].
+ *
+ * Uses a single query + JS-side dedup rather than per-wallet queries so
+ * hydrating 14 wallets remains one DB round-trip, not 14.
+ */
+export function getLatestPositionsForWallets(addresses, { sinceMs } = {}) {
+  if (!Array.isArray(addresses) || addresses.length === 0) return new Map();
+  const cutoff = Number.isFinite(sinceMs) ? sinceMs : Date.now() - 24 * 60 * 60 * 1000;
+  const placeholders = addresses.map(() => "?").join(",");
+  const rows = db.prepare(
+    `SELECT wallet_address, condition_id, outcome, size, avg_price,
+            current_value, pnl, snapshot_at
+       FROM positions_history
+      WHERE wallet_address IN (${placeholders})
+        AND snapshot_at >= ?
+      ORDER BY snapshot_at DESC`
+  ).all(...addresses, cutoff);
+
+  // Group by wallet, dedup by (cid, outcome), first-seen wins (newest).
+  const out = new Map();
+  for (const r of rows) {
+    let inner = out.get(r.wallet_address);
+    if (!inner) { inner = new Map(); out.set(r.wallet_address, inner); }
+    const k = `${r.condition_id}::${r.outcome || ""}`;
+    if (inner.has(k)) continue;
+    inner.set(k, {
+      conditionId:  r.condition_id,
+      outcome:      r.outcome,
+      size:         r.size,
+      avgPrice:     r.avg_price,
+      currentValue: r.current_value,
+      pnl:          r.pnl,
+      snapshotAt:   r.snapshot_at,
+    });
+  }
+  // Flatten inner Maps to arrays so callers can use .map / .filter directly.
+  const final = new Map();
+  for (const [addr, inner] of out) final.set(addr, [...inner.values()]);
+  return final;
+}
+
 export function deleteOldMarketSnapshots(cutoffMs) {
   return db.prepare("DELETE FROM market_snapshots WHERE timestamp < ?").run(cutoffMs).changes;
 }

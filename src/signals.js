@@ -17,6 +17,15 @@ const DEFAULTS = {
   // tradeoff is more noise — entry-edge filter below catches stale ones.
   // Raise back to 3 once eliteCount >= 5 stably.
   minWallets: 2,
+  // V1 accumulation override (companion to minWallets): include PRO-tier
+  // wallets (score 45-70) in consensus, not just ELITE (>70). Rationale:
+  // with eliteCount=1 the 2-of-2 ELITE consensus is structurally rare;
+  // 1 ELITE + 1 PRO is much more likely and only marginally noisier
+  // (PRO wallets still have closed_positions >= 10 and score > 45).
+  // Strength formula uses avgScore so 1+1 mixed signals naturally
+  // weight lower than 2+ pure-ELITE. Flip to false once eliteCount
+  // is stably >= 5.
+  includeProInConsensus: true,
   sizeCapPerWallet: 10000,// cap per-wallet weight at this USD value
   staleAfterScans: 3,     // mark STALE if not confirmed in N scans
   expireAfterScans: 6,    // mark EXPIRED after N scans without confirmation
@@ -62,8 +71,13 @@ export class SignalStore {
     // "we saw a consensus but it was already pumped" diagnostics.
     this.lastSkippedByEdge = [];
 
-    // Only use ELITE wallets
-    const elites = wallets.filter(w => w.tier === "ELITE");
+    // Tier filter: ELITE always; PRO included during V1 accumulation when
+    // eliteCount is too small to form pure-ELITE consensus. Variable name
+    // kept for backward compat — it's "qualifying wallets", not strictly elite.
+    const allowedTiers = cfg.includeProInConsensus
+      ? new Set(["ELITE", "PRO"])
+      : new Set(["ELITE"]);
+    const elites = wallets.filter(w => allowedTiers.has(w.tier));
     if (elites.length === 0) return this.getActiveSignals();
 
     // Track which signals were confirmed this scan

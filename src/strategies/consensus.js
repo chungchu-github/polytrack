@@ -14,9 +14,9 @@ export class ConsensusStrategy extends BaseStrategy {
       enabled: true,
       recencyDays: 7,
       minPositionSize: 10,
-      // V1-accumulation override (PR consensus-entry-edge): 3→2 while
-      // ELITE pool grows. Raise back to 3 once eliteCount >= 5 stably.
+      // V1-accumulation overrides — flip both back when eliteCount stably ≥ 5.
       minWallets: 2,
+      includeProInConsensus: true,
       sizeCapPerWallet: 10000,
       staleAfterScans: 3,
       expireAfterScans: 6,

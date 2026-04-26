@@ -194,12 +194,43 @@ describe("signals — filters", () => {
     assert.equal(store.detect(wallets, [market("CID-A")]).length, 0);
   });
 
-  it("ignores non-ELITE wallets", () => {
-    const store = new SignalStore();
+  it("ignores non-ELITE wallets when includeProInConsensus=false", () => {
+    const store = new SignalStore({ includeProInConsensus: false });
     const wallets = [
       { addr: "0x1", tier: "PRO",  score: 60, positions: [pos("CID-A", "Yes")], updatedAt: RECENT_MS },
       { addr: "0x2", tier: "PRO",  score: 60, positions: [pos("CID-A", "Yes")], updatedAt: RECENT_MS },
       { addr: "0x3", tier: "PRO",  score: 60, positions: [pos("CID-A", "Yes")], updatedAt: RECENT_MS },
+    ];
+    assert.equal(store.detect(wallets, [market("CID-A")]).length, 0);
+  });
+
+  it("includes PRO wallets when includeProInConsensus=true (V1 accumulation default)", () => {
+    const store = new SignalStore();   // default: includeProInConsensus=true
+    const wallets = [
+      { addr: "0x1", tier: "PRO",  score: 60, positions: [pos("CID-A", "Yes")], updatedAt: RECENT_MS },
+      { addr: "0x2", tier: "PRO",  score: 60, positions: [pos("CID-A", "Yes")], updatedAt: RECENT_MS },
+    ];
+    const sigs = store.detect(wallets, [market("CID-A")]);
+    assert.equal(sigs.length, 1);
+  });
+
+  it("ELITE + PRO mix forms a valid consensus (V1 accumulation realistic case)", () => {
+    const store = new SignalStore();
+    const wallets = [
+      { addr: "0x1", tier: "ELITE", score: 80, positions: [pos("CID-A", "Yes")], updatedAt: RECENT_MS },
+      { addr: "0x2", tier: "PRO",   score: 55, positions: [pos("CID-A", "Yes")], updatedAt: RECENT_MS },
+    ];
+    const sigs = store.detect(wallets, [market("CID-A")]);
+    assert.equal(sigs.length, 1);
+    // avgScore lower than pure-ELITE → strength penalty visible
+    assert.ok(sigs[0].strength < 80);
+  });
+
+  it("BASIC tier always excluded regardless of includeProInConsensus", () => {
+    const store = new SignalStore({ includeProInConsensus: true });
+    const wallets = [
+      { addr: "0x1", tier: "BASIC", score: 30, positions: [pos("CID-A", "Yes")], updatedAt: RECENT_MS },
+      { addr: "0x2", tier: "BASIC", score: 30, positions: [pos("CID-A", "Yes")], updatedAt: RECENT_MS },
     ];
     assert.equal(store.detect(wallets, [market("CID-A")]).length, 0);
   });
