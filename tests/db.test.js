@@ -11,6 +11,7 @@ import {
   startScan, completeScan, getLastScan, getStats,
   resolveSignal, getSignalAccuracy,
   insertMarketSnapshot, insertPositionSnapshot, getDataCaptureStats,
+  getLatestPositionsForWallets,
   insertWalletTier, getWalletTierAt,
   getTradesPnlByStrategy, getWalletDegradationCandidates,
   vacuumDB,
@@ -593,6 +594,60 @@ describe("import_rejections cache", () => {
   it("recordImportRejection returns 0 for empty/falsy address", () => {
     assert.equal(recordImportRejection("", "x"), 0);
     assert.equal(recordImportRejection(null, "x"), 0);
+  });
+});
+
+// ── getLatestPositionsForWallets (PR v1-accum hydrate) ──────────────────────
+
+describe("getLatestPositionsForWallets", () => {
+  const W1 = "0xabcd000000000000000000000000000000000001";
+  const W2 = "0xabcd000000000000000000000000000000000002";
+
+  before(() => {
+    getDB().exec("DELETE FROM positions_history");
+    const now = Date.now();
+    // W1 has 2 cids, multiple snapshots — newest should win
+    insertPositionSnapshot({ walletAddress: W1, conditionId: "C1", outcome: "Yes",
+      size: 100, avgPrice: 0.40, currentValue: 100, snapshotAt: now - 5 * 3600e3 });
+    insertPositionSnapshot({ walletAddress: W1, conditionId: "C1", outcome: "Yes",
+      size: 150, avgPrice: 0.42, currentValue: 150, snapshotAt: now - 1 * 3600e3 });   // newer — wins
+    insertPositionSnapshot({ walletAddress: W1, conditionId: "C2", outcome: "No",
+      size: 50,  avgPrice: 0.60, currentValue: 50,  snapshotAt: now - 2 * 3600e3 });
+    // W2 has 1 cid
+    insertPositionSnapshot({ walletAddress: W2, conditionId: "C3", outcome: "Yes",
+      size: 200, avgPrice: 0.30, currentValue: 200, snapshotAt: now - 3 * 3600e3 });
+    // Stale row — outside default 24h cutoff
+    insertPositionSnapshot({ walletAddress: W1, conditionId: "C-old", outcome: "Yes",
+      size: 999, snapshotAt: now - 48 * 3600e3 });
+  });
+
+  it("returns latest position per (wallet, cid, outcome) within 24h", () => {
+    const m = getLatestPositionsForWallets([W1, W2]);
+    assert.equal(m.size, 2);
+    const w1 = m.get(W1);
+    assert.equal(w1.length, 2, "C1 + C2; C-old excluded by stale cutoff");
+    const c1 = w1.find(p => p.conditionId === "C1");
+    assert.equal(c1.size, 150, "newest snapshot wins on dedup");
+    assert.equal(c1.avgPrice, 0.42);
+    const w2 = m.get(W2);
+    assert.equal(w2.length, 1);
+    assert.equal(w2[0].conditionId, "C3");
+  });
+
+  it("returns empty Map for empty input", () => {
+    assert.equal(getLatestPositionsForWallets([]).size, 0);
+    assert.equal(getLatestPositionsForWallets(null).size, 0);
+  });
+
+  it("respects custom sinceMs cutoff (allows pulling older snapshots)", () => {
+    const m = getLatestPositionsForWallets([W1], { sinceMs: 0 });   // no cutoff
+    const w1 = m.get(W1);
+    assert.ok(w1.find(p => p.conditionId === "C-old"), "stale row included when sinceMs=0");
+  });
+
+  it("ignores wallets with no position rows", () => {
+    const m = getLatestPositionsForWallets(["0xnoexist000000000000000000000000000000000"]);
+    assert.equal(m.size, 0);
   });
 });
 

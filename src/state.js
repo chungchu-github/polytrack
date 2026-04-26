@@ -40,6 +40,16 @@ export function createState(config = {}) {
 export function hydrateFromDB(state) {
   // Restore wallets
   const rows = db.getAllWallets();
+
+  // Pre-fetch latest positions per wallet in ONE query so collectTrackedConditionIds
+  // works on the very first scan after restart (was returning 0 cids until
+  // loadWallet repopulated each wallet — caused fromTrackedSource=0 in /health
+  // for the first scan cycle, observed live 2026-04-26).
+  const addrs = rows.map(r => r.address);
+  const positionsByAddr = db.getLatestPositionsForWallets(addrs, {
+    sinceMs: Date.now() - 24 * 60 * 60 * 1000,
+  });
+
   for (const row of rows) {
     state.wallets.set(row.address, {
       addr:            row.address,
@@ -56,8 +66,10 @@ export function hydrateFromDB(state) {
       closedPositions: row.closed_positions,
       openPositions:   row.open_positions,
       trades:          row.trade_count,
-      positions:       [],       // positions are large; loaded on demand
-      recentTrades:    [],       // same — loaded on demand
+      // Restored from positions_history (latest snap per cid+outcome
+      // within last 24h); next scan's loadWallet refreshes from API.
+      positions:       positionsByAddr.get(row.address) || [],
+      recentTrades:    [],       // not yet hydrated — loaded on demand
       updatedAt:       row.last_scored,
     });
   }
