@@ -137,15 +137,42 @@ export function captureWalletPositions(state) {
 }
 
 /**
- * Prune snapshot rows older than `daysToKeep`. Returns {markets, positions}
- * counts deleted.
+ * Prune snapshot rows older than the per-table retention window.
+ *
+ * Two tables grow at very different rates and serve different downstream
+ * needs, so they get separate windows:
+ *
+ *   - market_snapshots: 1 row per (token, scan) ≈ 60 markets × 2 tokens × 60
+ *     scans/h ≈ 7.2k rows/h ≈ 175k/day. Backtest + momentum need a longer
+ *     window (default 30d → ~5M rows, fine for a small VPS).
+ *
+ *   - positions_history: 1 row per (wallet, position, scan). With 14 active
+ *     wallets × ~200 cids × 60 scans/h that's 168k rows/h ≈ 4M/day —
+ *     accumulating to >50M in a couple weeks. The 90-day default caused a
+ *     production OOM crash loop on 2026-04-27 because hydrateFromDB tried
+ *     to .all() millions of rows. Default tightened to 7d (consensus
+ *     recency window is 7d so this is the longest we actually need for
+ *     signal detection; backtest replay can read history if asked).
+ *
+ * Backwards-compat: passing a bare number defaults BOTH tables to that
+ * window (preserves old call sites). Passing an object lets callers
+ * override per-table.
+ *
+ * Returns {markets, positions} delete counts.
  */
-export function pruneOldSnapshots(daysToKeep = 90) {
-  const cutoff = Date.now() - daysToKeep * 24 * 60 * 60 * 1000;
-  const markets = deleteOldMarketSnapshots(cutoff);
-  const positions = deleteOldPositionHistory(cutoff);
+export function pruneOldSnapshots(opts = {}) {
+  // Legacy form — pruneOldSnapshots(90) → both tables 90d.
+  if (typeof opts === "number") {
+    opts = { marketDays: opts, positionDays: opts };
+  }
+  const { marketDays = 30, positionDays = 7 } = opts;
+  const now = Date.now();
+  const marketCutoff   = now - marketDays   * 24 * 60 * 60 * 1000;
+  const positionCutoff = now - positionDays * 24 * 60 * 60 * 1000;
+  const markets   = deleteOldMarketSnapshots(marketCutoff);
+  const positions = deleteOldPositionHistory(positionCutoff);
   if (markets > 0 || positions > 0) {
-    log.db(`Snapshot prune: ${markets} market rows, ${positions} position rows (>${daysToKeep}d)`);
+    log.db(`Snapshot prune: ${markets} market rows (>${marketDays}d), ${positions} position rows (>${positionDays}d)`);
   }
   return { markets, positions };
 }
