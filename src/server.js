@@ -1581,10 +1581,26 @@ cron.schedule(`*/${SCAN_INTERVAL} * * * * *`, () => {
   }
 });
 
-// Daily snapshot retention — prune rows older than 90 days at 03:17 local time
-cron.schedule("17 3 * * *", () => {
-  try { pruneOldSnapshots(90); }
+// Snapshot retention — every 6h, with separate market vs position windows.
+// Was once-daily at 90d; positions_history accumulated to OOM-inducing size
+// between sweeps (production crash 2026-04-27). Now: positions 7d, markets 30d,
+// swept every 6h to keep DB bounded between runs. Runs at :17 past each
+// 6th hour to avoid colliding with the 03:00 backup job.
+cron.schedule("17 */6 * * *", () => {
+  try { pruneOldSnapshots(); }
   catch (e) { log.warn(`pruneOldSnapshots failed: ${e.message}`); }
+});
+
+// One-time prune on startup — handles the case where the server was down
+// for hours/days and has accumulated dead rows. Cheap when there's nothing
+// to delete; non-fatal if it fails.
+setImmediate(() => {
+  try {
+    const r = pruneOldSnapshots();
+    if (r.markets > 0 || r.positions > 0) {
+      log.info(`Boot-time prune: removed ${r.markets} market + ${r.positions} position rows`);
+    }
+  } catch (e) { log.warn(`Boot-time prune failed: ${e.message}`); }
 });
 
 // Daily SQLite backup at 03:00 local time — WAL-safe via sqlite3 .backup

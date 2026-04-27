@@ -119,9 +119,10 @@ describe("captureWalletPositions", () => {
 });
 
 describe("pruneOldSnapshots", () => {
-  it("deletes rows older than cutoff and keeps recent ones", () => {
-    const oldTs = Date.now() - 100 * 24 * 60 * 60 * 1000; // 100 days ago
-    const recentTs = Date.now() - 10 * 24 * 60 * 60 * 1000; // 10 days ago
+  // ── Backwards-compat: legacy bare-number form ──────────────────────────
+  it("legacy form pruneOldSnapshots(90) prunes both tables at 90d", () => {
+    const oldTs    = Date.now() - 100 * 24 * 60 * 60 * 1000; // 100 days ago
+    const recentTs = Date.now() - 10  * 24 * 60 * 60 * 1000; // 10 days ago
     insertMarketSnapshot({ conditionId: "c", tokenId: "t", timestamp: oldTs, midPrice: 0.5 });
     insertMarketSnapshot({ conditionId: "c", tokenId: "t", timestamp: recentTs, midPrice: 0.6 });
     insertPositionSnapshot({ walletAddress: "w", conditionId: "c", size: 1, snapshotAt: oldTs });
@@ -132,6 +133,52 @@ describe("pruneOldSnapshots", () => {
     assert.equal(res.positions, 1);
     assert.equal(getMarketSnapshots("c").length, 1);
     assert.equal(getPositionHistory("w").length, 1);
+  });
+
+  // ── Per-table windows (default 30d markets / 7d positions) ─────────────
+  it("default options use 30d markets / 7d positions", () => {
+    // Reset state
+    deleteOldMarketSnapshots(Date.now() + 1);
+    deleteOldPositionHistory(Date.now() + 1);
+
+    const now = Date.now();
+    // Market: 20d old — within 30d window, should survive
+    insertMarketSnapshot({ conditionId: "c1", tokenId: "t1", timestamp: now - 20 * 86400e3, midPrice: 0.5 });
+    // Market: 40d old — outside 30d window, should be pruned
+    insertMarketSnapshot({ conditionId: "c1", tokenId: "t1", timestamp: now - 40 * 86400e3, midPrice: 0.5 });
+    // Position: 5d old — within 7d window, should survive
+    insertPositionSnapshot({ walletAddress: "w1", conditionId: "c1", size: 1, snapshotAt: now - 5 * 86400e3 });
+    // Position: 10d old — outside 7d window (was OK at 90d), should be pruned
+    insertPositionSnapshot({ walletAddress: "w1", conditionId: "c1", size: 1, snapshotAt: now - 10 * 86400e3 });
+
+    const res = pruneOldSnapshots();   // defaults
+    assert.equal(res.markets,   1, "1 market row >30d pruned");
+    assert.equal(res.positions, 1, "1 position row >7d pruned (was 90d before)");
+    assert.equal(getMarketSnapshots("c1").length, 1);
+    assert.equal(getPositionHistory("w1").length, 1);
+  });
+
+  it("explicit per-table options override defaults", () => {
+    // Reset
+    deleteOldMarketSnapshots(Date.now() + 1);
+    deleteOldPositionHistory(Date.now() + 1);
+
+    const now = Date.now();
+    insertMarketSnapshot({ conditionId: "c2", tokenId: "t2", timestamp: now - 5 * 86400e3, midPrice: 0.5 });
+    insertPositionSnapshot({ walletAddress: "w2", conditionId: "c2", size: 1, snapshotAt: now - 2 * 86400e3 });
+
+    // Aggressive: 1d / 1d windows — both rows pruned
+    const res = pruneOldSnapshots({ marketDays: 1, positionDays: 1 });
+    assert.equal(res.markets, 1);
+    assert.equal(res.positions, 1);
+  });
+
+  it("returns zero counts when nothing to prune (idempotent boot-time call)", () => {
+    deleteOldMarketSnapshots(Date.now() + 1);
+    deleteOldPositionHistory(Date.now() + 1);
+    const res = pruneOldSnapshots();
+    assert.equal(res.markets, 0);
+    assert.equal(res.positions, 0);
   });
 });
 
