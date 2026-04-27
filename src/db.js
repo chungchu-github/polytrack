@@ -473,30 +473,50 @@ export function getPositionHistory(walletAddress, sinceMs = 0, untilMs = Date.no
  * Returns a Map<walletAddress, position[]> where each position is the
  * last-seen snapshot's data shaped like wallet.positions[].
  *
- * Uses a single query + JS-side dedup rather than per-wallet queries so
- * hydrating 14 wallets remains one DB round-trip, not 14.
+ * IMPORTANT (post-PR-28 OOM hot-fix 2026-04-28): the previous version
+ * loaded all matching rows via `.all()` and dedup'd in JS. With 14
+ * tracked wallets, 60s scan cadence, and 200 unique cids per wallet, the
+ * 24h `positions_history` window contains millions of rows; loading
+ * those into the JS heap OOM'd the process within ~25s of startup,
+ * pulling pm2 into a crash loop. Fix:
+ *
+ *   1. Dedup at SQL level via ROW_NUMBER() so we never materialise
+ *      duplicates in the JS heap.
+ *   2. Tighten default cutoff from 24h → 6h (positions don't move
+ *      fast enough that hydration needs a longer lookback).
+ *   3. Hard LIMIT as a belt-and-suspenders cap.
  */
-export function getLatestPositionsForWallets(addresses, { sinceMs } = {}) {
+export function getLatestPositionsForWallets(addresses, { sinceMs, hardLimit = 5000 } = {}) {
   if (!Array.isArray(addresses) || addresses.length === 0) return new Map();
-  const cutoff = Number.isFinite(sinceMs) ? sinceMs : Date.now() - 24 * 60 * 60 * 1000;
+  const cutoff = Number.isFinite(sinceMs) ? sinceMs : Date.now() - 6 * 60 * 60 * 1000;
   const placeholders = addresses.map(() => "?").join(",");
+
+  // COALESCE on outcome so NULL values group consistently with the
+  // JS-side `r.outcome || ""` key that callers compare against.
   const rows = db.prepare(
     `SELECT wallet_address, condition_id, outcome, size, avg_price,
             current_value, pnl, snapshot_at
-       FROM positions_history
-      WHERE wallet_address IN (${placeholders})
-        AND snapshot_at >= ?
-      ORDER BY snapshot_at DESC`
-  ).all(...addresses, cutoff);
+       FROM (
+         SELECT wallet_address, condition_id, outcome, size, avg_price,
+                current_value, pnl, snapshot_at,
+                ROW_NUMBER() OVER (
+                  PARTITION BY wallet_address, condition_id, COALESCE(outcome, '')
+                  ORDER BY snapshot_at DESC
+                ) AS rn
+           FROM positions_history
+          WHERE wallet_address IN (${placeholders})
+            AND snapshot_at >= ?
+       ) latest
+      WHERE rn = 1
+      LIMIT ?`
+  ).all(...addresses, cutoff, hardLimit);
 
-  // Group by wallet, dedup by (cid, outcome), first-seen wins (newest).
+  // Single grouping pass — rows are already deduped at SQL level.
   const out = new Map();
   for (const r of rows) {
-    let inner = out.get(r.wallet_address);
-    if (!inner) { inner = new Map(); out.set(r.wallet_address, inner); }
-    const k = `${r.condition_id}::${r.outcome || ""}`;
-    if (inner.has(k)) continue;
-    inner.set(k, {
+    let arr = out.get(r.wallet_address);
+    if (!arr) { arr = []; out.set(r.wallet_address, arr); }
+    arr.push({
       conditionId:  r.condition_id,
       outcome:      r.outcome,
       size:         r.size,
@@ -506,10 +526,7 @@ export function getLatestPositionsForWallets(addresses, { sinceMs } = {}) {
       snapshotAt:   r.snapshot_at,
     });
   }
-  // Flatten inner Maps to arrays so callers can use .map / .filter directly.
-  const final = new Map();
-  for (const [addr, inner] of out) final.set(addr, [...inner.values()]);
-  return final;
+  return out;
 }
 
 export function deleteOldMarketSnapshots(cutoffMs) {
