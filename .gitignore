@@ -5,3 +5,4 @@ frontend/dist/
 .DS_Store
 *.log
 .claude/
+scripts/__pycache__/

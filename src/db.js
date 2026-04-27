@@ -38,6 +38,7 @@ export function initDB(dbPath) {
   migrateV9();
   migrateV10();
   migrateV11();
+  migrateV12();
   return db;
 }
 
@@ -319,6 +320,16 @@ function migrateV11() {
     );
     CREATE INDEX IF NOT EXISTS idx_import_rejections_ts ON import_rejections(rejected_at);
   `);
+}
+
+// ── Schema Migration v12 — track wallet discovery source ────────────────────
+// Lets the UI and diagnostics distinguish poly_data-bootstrapped wallets from
+// those found via leaderboard or active-trader polling.
+function migrateV12() {
+  const cols = db.prepare("PRAGMA table_info(wallets)").all().map(c => c.name);
+  if (!cols.includes("data_source")) {
+    db.exec("ALTER TABLE wallets ADD COLUMN data_source TEXT DEFAULT 'live'");
+  }
 }
 
 // ── Schema Migration v10 — persist neg_risk per trade ──────────────────────
