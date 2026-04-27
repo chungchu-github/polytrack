@@ -649,5 +649,47 @@ describe("getLatestPositionsForWallets", () => {
     const m = getLatestPositionsForWallets(["0xnoexist000000000000000000000000000000000"]);
     assert.equal(m.size, 0);
   });
+
+  // ── OOM hot-fix regression guard (PR fix/hydrate-positions-oom) ────────
+  it("dedups millions of duplicate snapshots at SQL level (no JS-heap blowup)", () => {
+    const W = "0xstress00000000000000000000000000000000001";
+    const db = getDB();
+    db.exec("DELETE FROM positions_history WHERE wallet_address = ?".replace("?", `'${W}'`));
+
+    // Insert 5,000 snapshots for the SAME (cid, outcome) — pre-fix this
+    // would deserialize all 5k rows into JS before deduping. Post-fix,
+    // SQL ROW_NUMBER() returns exactly one row.
+    const insert = db.prepare(`INSERT INTO positions_history
+      (wallet_address, condition_id, outcome, size, avg_price, current_value, pnl, snapshot_at)
+      VALUES (?, 'STRESS_C', 'Yes', ?, 0.5, 100, 0, ?)`);
+    const tx = db.transaction(() => {
+      const base = Date.now() - 60 * 60 * 1000;
+      for (let i = 0; i < 5000; i++) insert.run(W, i, base + i);
+    });
+    tx();
+
+    const m = getLatestPositionsForWallets([W]);
+    assert.equal(m.size, 1);
+    const positions = m.get(W);
+    assert.equal(positions.length, 1, "exactly one row per (cid,outcome) — SQL dedup worked");
+    // newest snapshot_at wins → biggest i
+    assert.equal(positions[0].size, 4999);
+  });
+
+  it("default cutoff is 6h (not 24h)", () => {
+    const W = "0xcutoff00000000000000000000000000000000001";
+    const db = getDB();
+    db.exec("DELETE FROM positions_history WHERE wallet_address = ?".replace("?", `'${W}'`));
+    const now = Date.now();
+    insertPositionSnapshot({ walletAddress: W, conditionId: "C-fresh", outcome: "Yes",
+      size: 1, snapshotAt: now - 1 * 3600e3 });
+    insertPositionSnapshot({ walletAddress: W, conditionId: "C-stale", outcome: "Yes",
+      size: 1, snapshotAt: now - 12 * 3600e3 });   // older than new 6h default
+
+    const m = getLatestPositionsForWallets([W]);
+    const cids = m.get(W).map(p => p.conditionId);
+    assert.ok(cids.includes("C-fresh"));
+    assert.ok(!cids.includes("C-stale"), "12h-old rows must be excluded by 6h default cutoff");
+  });
 });
 

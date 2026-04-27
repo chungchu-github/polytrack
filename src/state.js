@@ -45,10 +45,23 @@ export function hydrateFromDB(state) {
   // works on the very first scan after restart (was returning 0 cids until
   // loadWallet repopulated each wallet — caused fromTrackedSource=0 in /health
   // for the first scan cycle, observed live 2026-04-26).
+  //
+  // Wrapped in try/catch — a hydrate failure must NOT prevent boot. If
+  // positions_history is huge or query fails, we'd rather start with empty
+  // positions than crash-loop pm2 (observed 2026-04-28 OOM).
   const addrs = rows.map(r => r.address);
-  const positionsByAddr = db.getLatestPositionsForWallets(addrs, {
-    sinceMs: Date.now() - 24 * 60 * 60 * 1000,
-  });
+  let positionsByAddr = new Map();
+  try {
+    positionsByAddr = db.getLatestPositionsForWallets(addrs, {
+      // Default 6h window (helper enforces this internally too);
+      // explicit here so the boot-time intent is documented.
+      sinceMs: Date.now() - 6 * 60 * 60 * 1000,
+    });
+  } catch (e) {
+    // Don't let DB issues block startup — first scan will populate via API.
+    // eslint-disable-next-line no-console
+    console.warn(`hydrate: getLatestPositionsForWallets failed (${e.message}); starting with empty positions`);
+  }
 
   for (const row of rows) {
     state.wallets.set(row.address, {
