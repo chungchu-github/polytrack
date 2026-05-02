@@ -37,6 +37,15 @@ const DEFAULTS = {
   // Especially important under single-ELITE follow — without consensus
   // smoothing, this is the main protection against late entries.
   maxEntryDrift: 0.15,
+  // Low-price ratio cap (2026-05-02). Absolute drift is the wrong metric in
+  // sub-cent markets: ELITE 0.4¢ → market 1.9¢ is +0.015 absolute (passes
+  // 0.15 gate) but +375% probability move (the ELITE's edge is gone). For
+  // markets where the ELITE entered below `lowPriceEntryThreshold`, switch
+  // to a multiplicative cap: skip when current / entry > maxEntryRatio.
+  // Set maxEntryRatio to null to disable the ratio gate (falls back to
+  // absolute-drift behaviour for low-price markets).
+  lowPriceEntryThreshold: 0.05,
+  maxEntryRatio: 2.0,
 };
 
 // ── Signal Store ─────────────────────────────────────────────────────────────
@@ -148,6 +157,8 @@ export class SignalStore {
             market: m,
             direction: dir,
             maxDrift: cfg.maxEntryDrift,
+            lowPriceEntryThreshold: cfg.lowPriceEntryThreshold,
+            maxEntryRatio: cfg.maxEntryRatio,
           });
           if (entryAnalysis.skip) {
             this.lastSkippedByEdge.push({
@@ -157,6 +168,7 @@ export class SignalStore {
               eliteAvgEntry: entryAnalysis.eliteAvgEntry,
               currentPrice: entryAnalysis.currentPrice,
               entryEdge: entryAnalysis.entryEdge,
+              entryRatio: entryAnalysis.entryRatio,
             });
             continue;
           }
@@ -171,6 +183,7 @@ export class SignalStore {
             eliteAvgEntry: entryAnalysis.eliteAvgEntry ?? null,
             currentPrice:  entryAnalysis.currentPrice  ?? null,
             entryEdge:     entryAnalysis.entryEdge     ?? null,
+            entryRatio:    entryAnalysis.entryRatio    ?? null,
           };
 
           if (this.signals.has(key)) {
@@ -315,19 +328,31 @@ function calcStrength(aligned, allElites, directions) {
  * Decide whether a consensus signal should fire based on how far the current
  * market price has drifted above the ELITE wallets' weighted-average entry.
  *
+ * Two complementary gates:
+ *   - Absolute drift (maxDrift, default 0.15): currentPrice − entry > 0.15
+ *     → skip. Right metric in the 5–95¢ regime.
+ *   - Multiplicative ratio (maxEntryRatio, default 2.0) — only applied when
+ *     entry was below `lowPriceEntryThreshold` (default 5¢): currentPrice /
+ *     entry > 2.0 → skip. Right metric in sub-cent / extreme-long-tail
+ *     markets, where +1¢ is a 250% probability move but +0.6¢ absolute slips
+ *     under any sensible cents-based cap.
+ * Both gates are independent — a signal must pass whichever rule applies for
+ * its entry-price regime.
+ *
  * Reads currentPrice from the market metadata (`lastTradePrice` /
  * `outcomePrices`), NOT from orderbook snapshots. Polymarket's /book is
  * mostly sentinel noise; lastTradePrice is the true recent mark.
  *
  * Returns:
- *   { skip: false, eliteAvgEntry, currentPrice, entryEdge }
+ *   { skip: false, eliteAvgEntry, currentPrice, entryEdge, entryRatio }
  *     — proceed; surface the prices on the signal payload
  *   { skip: true, reason, ...prices }
  *     — drop the signal; reason is one of:
- *         "drift-exceeded"  → currentPrice > entry + maxDrift (chasing)
- *         "no-market"       → market metadata not supplied (legacy)
- *         "no-price"        → market lacks a usable lastTradePrice
- *         "no-entry"        → ELITE positions had no avgPrice (data gap)
+ *         "drift-exceeded"        → currentPrice > entry + maxDrift
+ *         "ratio-exceeded"        → low-entry market, current/entry > maxRatio
+ *         "no-market"             → market metadata not supplied (legacy)
+ *         "no-price"              → market lacks a usable lastTradePrice
+ *         "no-entry"              → ELITE positions had no avgPrice (data gap)
  *
  * Non-rejection cases preserve legacy "let through" behaviour so we don't
  * block consensus on missing data.
@@ -336,7 +361,11 @@ function calcStrength(aligned, allElites, directions) {
  * convention (outcomePrices[0]=YES, [1]=NO; or lastTradePrice ≈ YES, with
  * NO ≈ 1 − lastTradePrice as fallback).
  */
-export function analyseEntryEdge({ aligned, market, direction, maxDrift }) {
+export function analyseEntryEdge({
+  aligned, market, direction, maxDrift,
+  lowPriceEntryThreshold = 0.05,
+  maxEntryRatio = 2.0,
+}) {
   if (!Array.isArray(aligned) || aligned.length === 0) {
     return { skip: false, reason: "no-aligned" };
   }
@@ -364,15 +393,30 @@ export function analyseEntryEdge({ aligned, market, direction, maxDrift }) {
     return { skip: false, reason: "no-price", eliteAvgEntry };
   }
 
-  const entryEdge = currentPrice - eliteAvgEntry;
+  const entryEdge  = currentPrice - eliteAvgEntry;
+  const entryRatio = eliteAvgEntry > 0 ? currentPrice / eliteAvgEntry : null;
+
+  // Ratio gate applies only when ELITE entered cheap (< lowPriceEntryThreshold).
+  // In the normal-price regime the absolute-drift gate is more meaningful.
+  const useRatioGate =
+    Number.isFinite(lowPriceEntryThreshold) &&
+    eliteAvgEntry < lowPriceEntryThreshold &&
+    Number.isFinite(maxEntryRatio);
+
+  if (useRatioGate && Number.isFinite(entryRatio) && entryRatio > maxEntryRatio) {
+    return {
+      skip: true, reason: "ratio-exceeded",
+      eliteAvgEntry, currentPrice, entryEdge, entryRatio,
+    };
+  }
 
   if (Number.isFinite(maxDrift) && entryEdge > maxDrift) {
     return {
       skip: true, reason: "drift-exceeded",
-      eliteAvgEntry, currentPrice, entryEdge,
+      eliteAvgEntry, currentPrice, entryEdge, entryRatio,
     };
   }
-  return { skip: false, eliteAvgEntry, currentPrice, entryEdge };
+  return { skip: false, eliteAvgEntry, currentPrice, entryEdge, entryRatio };
 }
 
 /**
@@ -382,11 +426,17 @@ export function analyseEntryEdge({ aligned, market, direction, maxDrift }) {
  *
  * Returns null when no usable price is available.
  */
-// "Usable" price range matches filterByLastTradePrice's default threshold
-// (0.02 / 0.98). Markets at the extremes are effectively resolved and
-// shouldn't drive entry-edge math even if they slip past the upstream filter.
-const USABLE_LO = 0.02;
-const USABLE_HI = 0.98;
+// "Usable" price range — anything outside is treated as effectively resolved.
+// Pre-2026-05-02 the bounds matched filterByLastTradePrice's default (0.02 /
+// 0.98), but that left a hole: long-shot active markets (sub-1¢ politics
+// nominee bets, extreme far-OTM events) bypassed entry-edge entirely.
+// Production diagnosis: an ELITE entered 5 such markets at ~0.4¢; market had
+// pumped to 1.9¢ (~5×) but signals fired with `entryEdge: null` because the
+// price was below USABLE_LO. Lowered to 0.005 / 0.995 so those markets DO
+// flow into the ratio check below; only truly-resolved (≤0.5¢ NO / ≥99.5¢
+// YES) get short-circuited.
+const USABLE_LO = 0.005;
+const USABLE_HI = 0.995;
 function isUsablePrice(p) {
   return Number.isFinite(p) && p > USABLE_LO && p < USABLE_HI;
 }
