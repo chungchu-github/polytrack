@@ -39,6 +39,26 @@ const DEFAULTS = {
     maxHoldDays: 14,
     stopLossPct: 0.30,
   },
+  // Snapshot retention windows. Defaults sized for a 23G VPS where the
+  // working DB hits 6.9G at steady state — VACUUM needs ~2x DB size of free
+  // disk, so we keep both tables tight enough that the file doesn't grow
+  // past what the host can comfortably hold + back up. Production crash
+  // 2026-05-02: 30d markets / 7d positions accumulated 6.9G DB, then 30d
+  // backups (8.5G) ran disk to 100%, `database or disk is full` everywhere.
+  // Tightened defaults below are derived from that recovery.
+  retention: {
+    positionDays:    1,    // was 7d; positions_history grows ~2.4M rows/day
+                           // at this scan cadence — 1d keeps DB ≈ 2-3G
+    marketDays:      7,    // was 30d; market_snapshots ~1.4M rows/day
+    // Auto-aggressive trip: when disk usage exceeds this fraction, the
+    // 6h prune cron switches to emergency-mode retention (positionsHrs h,
+    // marketsHrs h) instead of the configured days. Belt-and-suspenders
+    // so an unexpected growth burst can't OOM-kill the whole host again.
+    emergencyDiskUsedFrac: 0.85,
+    emergencyPositionHours: 6,
+    emergencyMarketHours:   24,
+  },
+
   // killSwitch — autonomous auto-trade circuit breaker. Trips when any of
   // three conditions hits the configured threshold. Default thresholds are
   // set for the V1 small-amount validation budget ($50-100). Adjust upward
@@ -104,6 +124,10 @@ export function saveConfig(patch) {
       next.killSwitch = mergeKillSwitch(current.killSwitch || DEFAULTS.killSwitch, v);
       continue;
     }
+    if (k === "retention" && v && typeof v === "object") {
+      next.retention = mergeRetention(current.retention || DEFAULTS.retention, v);
+      continue;
+    }
     if (typeof DEFAULTS[k] === "number") {
       const n = Number(v);
       if (!Number.isFinite(n) || n < 0) continue;
@@ -133,6 +157,25 @@ function mergeAutoImport(existing, patch) {
       .map(w => String(w))
       .filter(w => allowed.has(w));
     if (out.windows.length === 0) out.windows = base.windows;
+  }
+  return out;
+}
+
+function mergeRetention(existing, patch) {
+  const base = existing || DEFAULTS.retention;
+  const out = { ...base };
+  for (const k of [
+    "positionDays", "marketDays",
+    "emergencyPositionHours", "emergencyMarketHours",
+  ]) {
+    if (Number.isFinite(Number(patch[k])) && Number(patch[k]) >= 0) {
+      out[k] = Number(patch[k]);
+    }
+  }
+  // emergencyDiskUsedFrac must be in (0, 1]
+  if (Number.isFinite(Number(patch.emergencyDiskUsedFrac))) {
+    const v = Number(patch.emergencyDiskUsedFrac);
+    if (v > 0 && v <= 1) out.emergencyDiskUsedFrac = v;
   }
   return out;
 }
