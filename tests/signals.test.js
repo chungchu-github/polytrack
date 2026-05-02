@@ -311,10 +311,25 @@ describe("analyseEntryEdge", () => {
     assert.ok(Math.abs(r.currentPrice - 0.70) < 1e-9);
   });
 
+  it("sub-cent markets are now usable (USABLE_LO lowered to 0.005)", () => {
+    // Pre-2026-05-02 a 0.01 YES market was 'no-price' (< 0.02 threshold).
+    // Now it must flow into the drift/ratio gates.
+    const r = analyseEntryEdge({
+      aligned,                                                       // entry 0.4375
+      market: { conditionId: "X", outcomePrices: [0.01, 0.99] },
+      direction: "YES", maxDrift: 0.15,
+    });
+    // 0.01 < 0.4375 entry → entryEdge negative → passes both gates.
+    assert.equal(r.skip, false);
+    assert.equal(r.currentPrice, 0.01);
+    assert.ok(r.entryEdge < 0);
+  });
+
   it("passes through when market has no usable price (extremes / null)", () => {
     const r1 = analyseEntryEdge({
       aligned,
-      market: { conditionId: "X", outcomePrices: [0.999, 0.001] },   // extreme
+      // 0.999 still > USABLE_HI (0.995); 0.001 still < USABLE_LO (0.005).
+      market: { conditionId: "X", outcomePrices: [0.999, 0.001] },
       direction: "YES", maxDrift: 0.15,
     });
     assert.equal(r1.skip, false);
@@ -334,6 +349,67 @@ describe("analyseEntryEdge", () => {
     const r = analyseEntryEdge({ aligned: noPrice, market: marketMeta(0.99), direction: "YES", maxDrift: 0.15 });
     assert.equal(r.skip, false);
     assert.equal(r.reason, "no-entry");
+  });
+});
+
+// ── Low-price ratio gate (2026-05-02) ───────────────────────────────────────
+
+describe("analyseEntryEdge — ratio gate for sub-cent markets", () => {
+  // Single ELITE bought at 0.4¢. Production case from PR #33 deploy.
+  const lowEntry = [{ addr: "0x1", weight: 0.02, avgPrice: 0.004, posValue: 200 }];
+
+  it("rejects when entry<5¢ AND current/entry exceeds 2× (default ratio cap)", () => {
+    // ELITE 0.4¢, market now 1.9¢ → ratio 4.75× — the original production miss.
+    const r = analyseEntryEdge({
+      aligned: lowEntry, market: marketMeta(0.019),
+      direction: "YES", maxDrift: 0.15,
+    });
+    assert.equal(r.skip, true);
+    assert.equal(r.reason, "ratio-exceeded");
+    assert.ok(r.entryRatio > 2);
+    // Absolute drift would have let it through (0.015 < 0.15) — that's the bug.
+    assert.ok(r.entryEdge < 0.15);
+  });
+
+  it("passes low-entry market when ratio is under cap", () => {
+    // ELITE 0.4¢, market now 0.7¢ → ratio 1.75× < 2.0
+    const r = analyseEntryEdge({
+      aligned: lowEntry, market: marketMeta(0.007),
+      direction: "YES", maxDrift: 0.15,
+    });
+    assert.equal(r.skip, false);
+    assert.ok(r.entryRatio > 1 && r.entryRatio < 2);
+  });
+
+  it("ratio gate disabled above lowPriceEntryThreshold (5¢)", () => {
+    // Entry 6¢ — ratio 4× would be huge but threshold disables it.
+    // Absolute drift then judges: 0.24 - 0.06 = 0.18 > 0.15 → drift-exceeded.
+    const aligned = [{ addr: "0x1", weight: 0.5, avgPrice: 0.06, posValue: 500 }];
+    const r = analyseEntryEdge({
+      aligned, market: marketMeta(0.24),
+      direction: "YES", maxDrift: 0.15,
+    });
+    assert.equal(r.skip, true);
+    assert.equal(r.reason, "drift-exceeded");
+  });
+
+  it("respects custom maxEntryRatio override", () => {
+    // Same 1.75× scenario, but operator wants strict 1.5× cap → reject.
+    const r = analyseEntryEdge({
+      aligned: lowEntry, market: marketMeta(0.007),
+      direction: "YES", maxDrift: 0.15, maxEntryRatio: 1.5,
+    });
+    assert.equal(r.skip, true);
+    assert.equal(r.reason, "ratio-exceeded");
+  });
+
+  it("setting maxEntryRatio=null disables the ratio gate (legacy behaviour)", () => {
+    // 4.75× would normally skip; null disables → falls through to absolute drift.
+    const r = analyseEntryEdge({
+      aligned: lowEntry, market: marketMeta(0.019),
+      direction: "YES", maxDrift: 0.15, maxEntryRatio: null,
+    });
+    assert.equal(r.skip, false);
   });
 });
 

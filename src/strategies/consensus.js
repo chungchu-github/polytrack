@@ -30,6 +30,11 @@ export class ConsensusStrategy extends BaseStrategy {
       staleAfterScans: 3,
       expireAfterScans: 6,
       maxEntryDrift: 0.15,
+      // Sub-cent / extreme-long-tail markets: the absolute drift is the wrong
+      // metric (a 0.4¢ → 1.9¢ move is +1.5¢ but the implied probability moved
+      // 5×). Apply a ratio cap when the ELITE entered below this threshold.
+      lowPriceEntryThreshold: 0.05,
+      maxEntryRatio: 2.0,
     };
   }
   get name() { return "consensus"; }
