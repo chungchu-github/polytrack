@@ -135,27 +135,29 @@ describe("pruneOldSnapshots", () => {
     assert.equal(getPositionHistory("w").length, 1);
   });
 
-  // ── Per-table windows (default 30d markets / 7d positions) ─────────────
-  it("default options use 30d markets / 7d positions", () => {
+  // ── Per-table windows (default 7d markets / 1d positions, post 2026-05-02) ─
+  it("default options use 7d markets / 1d positions", () => {
     // Reset state
     deleteOldMarketSnapshots(Date.now() + 1);
     deleteOldPositionHistory(Date.now() + 1);
 
     const now = Date.now();
-    // Market: 20d old — within 30d window, should survive
-    insertMarketSnapshot({ conditionId: "c1", tokenId: "t1", timestamp: now - 20 * 86400e3, midPrice: 0.5 });
-    // Market: 40d old — outside 30d window, should be pruned
-    insertMarketSnapshot({ conditionId: "c1", tokenId: "t1", timestamp: now - 40 * 86400e3, midPrice: 0.5 });
-    // Position: 5d old — within 7d window, should survive
-    insertPositionSnapshot({ walletAddress: "w1", conditionId: "c1", size: 1, snapshotAt: now - 5 * 86400e3 });
-    // Position: 10d old — outside 7d window (was OK at 90d), should be pruned
-    insertPositionSnapshot({ walletAddress: "w1", conditionId: "c1", size: 1, snapshotAt: now - 10 * 86400e3 });
+    // Market: 5d old — within 7d window, should survive
+    insertMarketSnapshot({ conditionId: "c1", tokenId: "t1", timestamp: now - 5 * 86400e3, midPrice: 0.5 });
+    // Market: 10d old — outside 7d window, should be pruned
+    insertMarketSnapshot({ conditionId: "c1", tokenId: "t1", timestamp: now - 10 * 86400e3, midPrice: 0.5 });
+    // Position: 12h old — within 1d window, should survive
+    insertPositionSnapshot({ walletAddress: "w1", conditionId: "c1", size: 1, snapshotAt: now - 12 * 3600e3 });
+    // Position: 2d old — outside 1d window, should be pruned
+    insertPositionSnapshot({ walletAddress: "w1", conditionId: "c1", size: 1, snapshotAt: now - 2 * 86400e3 });
 
-    const res = pruneOldSnapshots();   // defaults
-    assert.equal(res.markets,   1, "1 market row >30d pruned");
-    assert.equal(res.positions, 1, "1 position row >7d pruned (was 90d before)");
+    // _bypassEmergency keeps the test deterministic regardless of CI disk usage
+    const res = pruneOldSnapshots({ _bypassEmergency: true });
+    assert.equal(res.markets,   1, "1 market row >7d pruned");
+    assert.equal(res.positions, 1, "1 position row >1d pruned");
     assert.equal(getMarketSnapshots("c1").length, 1);
     assert.equal(getPositionHistory("w1").length, 1);
+    assert.equal(res.mode, "normal");
   });
 
   it("explicit per-table options override defaults", () => {
@@ -168,7 +170,7 @@ describe("pruneOldSnapshots", () => {
     insertPositionSnapshot({ walletAddress: "w2", conditionId: "c2", size: 1, snapshotAt: now - 2 * 86400e3 });
 
     // Aggressive: 1d / 1d windows — both rows pruned
-    const res = pruneOldSnapshots({ marketDays: 1, positionDays: 1 });
+    const res = pruneOldSnapshots({ marketDays: 1, positionDays: 1, _bypassEmergency: true });
     assert.equal(res.markets, 1);
     assert.equal(res.positions, 1);
   });
@@ -176,9 +178,32 @@ describe("pruneOldSnapshots", () => {
   it("returns zero counts when nothing to prune (idempotent boot-time call)", () => {
     deleteOldMarketSnapshots(Date.now() + 1);
     deleteOldPositionHistory(Date.now() + 1);
-    const res = pruneOldSnapshots();
+    const res = pruneOldSnapshots({ _bypassEmergency: true });
     assert.equal(res.markets, 0);
     assert.equal(res.positions, 0);
+  });
+
+  // ── Emergency mode (disk-full safety net) ──────────────────────────────
+  it("trips emergency mode when forced disk usage exceeds threshold", () => {
+    deleteOldMarketSnapshots(Date.now() + 1);
+    deleteOldPositionHistory(Date.now() + 1);
+    const now = Date.now();
+    // Position 12h old — survives 1d normal default but pruned at emergency 6h
+    insertPositionSnapshot({ walletAddress: "w3", conditionId: "c3", size: 1, snapshotAt: now - 12 * 3600e3 });
+    // Position 2h old — survives even emergency
+    insertPositionSnapshot({ walletAddress: "w3", conditionId: "c3", size: 1, snapshotAt: now - 2 * 3600e3 });
+
+    const res = pruneOldSnapshots({ _forceUsedFrac: 0.9 });
+    assert.equal(res.mode, "emergency");
+    assert.equal(res.positions, 1, "12h-old position pruned by 6h emergency window");
+    assert.equal(getPositionHistory("w3").length, 1);
+  });
+
+  it("stays in normal mode when forced disk usage below threshold", () => {
+    deleteOldMarketSnapshots(Date.now() + 1);
+    deleteOldPositionHistory(Date.now() + 1);
+    const res = pruneOldSnapshots({ _forceUsedFrac: 0.5 });
+    assert.equal(res.mode, "normal");
   });
 });
 

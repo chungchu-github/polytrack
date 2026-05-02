@@ -15,6 +15,8 @@ import {
   deleteOldMarketSnapshots, deleteOldPositionHistory,
 } from "./db.js";
 import { fetchOrderBook, fetchOrderBooks } from "./polymarket-api.js";
+import { loadConfig } from "./config.js";
+import { getDiskUsage } from "./disk.js";
 import log from "./logger.js";
 
 const BATCH_BOOKS_MAX = 500;
@@ -139,40 +141,70 @@ export function captureWalletPositions(state) {
 /**
  * Prune snapshot rows older than the per-table retention window.
  *
- * Two tables grow at very different rates and serve different downstream
- * needs, so they get separate windows:
+ * Reads windows from runtime config (cfg.retention.{market,position}Days)
+ * with hard defaults if config is missing/invalid. The 6h cron passes no
+ * args; ad-hoc callers can override via opts (back-compat preserved).
  *
- *   - market_snapshots: 1 row per (token, scan) ≈ 60 markets × 2 tokens × 60
- *     scans/h ≈ 7.2k rows/h ≈ 175k/day. Backtest + momentum need a longer
- *     window (default 30d → ~5M rows, fine for a small VPS).
+ * Emergency-aggressive mode: when disk usage on the DB partition exceeds
+ * `cfg.retention.emergencyDiskUsedFrac` (default 0.85), retention falls
+ * back to `emergencyPositionHours` / `emergencyMarketHours` (much shorter)
+ * regardless of the configured days. This is a safety net so an
+ * unexpected accumulation burst can't fill the disk and lock writes
+ * (production crash 2026-05-02).
  *
- *   - positions_history: 1 row per (wallet, position, scan). With 14 active
- *     wallets × ~200 cids × 60 scans/h that's 168k rows/h ≈ 4M/day —
- *     accumulating to >50M in a couple weeks. The 90-day default caused a
- *     production OOM crash loop on 2026-04-27 because hydrateFromDB tried
- *     to .all() millions of rows. Default tightened to 7d (consensus
- *     recency window is 7d so this is the longest we actually need for
- *     signal detection; backtest replay can read history if asked).
- *
- * Backwards-compat: passing a bare number defaults BOTH tables to that
- * window (preserves old call sites). Passing an object lets callers
- * override per-table.
- *
- * Returns {markets, positions} delete counts.
+ * Returns {markets, positions, mode} where mode = "normal" | "emergency".
  */
 export function pruneOldSnapshots(opts = {}) {
-  // Legacy form — pruneOldSnapshots(90) → both tables 90d.
+  // Legacy form — pruneOldSnapshots(90) → both tables 90d. Skips emergency check.
   if (typeof opts === "number") {
-    opts = { marketDays: opts, positionDays: opts };
+    opts = { marketDays: opts, positionDays: opts, _bypassEmergency: true };
   }
-  const { marketDays = 30, positionDays = 7 } = opts;
+  const cfg = (() => {
+    try { return loadConfig().retention || {}; } catch { return {}; }
+  })();
+  const positionDays = pickFinite(opts.positionDays, cfg.positionDays, 1);
+  const marketDays   = pickFinite(opts.marketDays,   cfg.marketDays,   7);
+
+  // Emergency check — 6h-cron invocation (opts empty) consults disk; legacy
+  // bare-number callers bypass so unit tests stay deterministic.
+  // Tests can also pass opts._forceUsedFrac to drive the gate directly.
+  let mode = "normal";
+  let positionHours = positionDays * 24;
+  let marketHours   = marketDays * 24;
+  if (!opts._bypassEmergency) {
+    const usedFrac = Number.isFinite(opts._forceUsedFrac)
+      ? opts._forceUsedFrac
+      : (getDiskUsage("./data")?.usedFrac ?? 0);
+    const trip  = pickFinite(cfg.emergencyDiskUsedFrac, 0.85);
+    if (usedFrac >= trip) {
+      mode = "emergency";
+      positionHours = pickFinite(cfg.emergencyPositionHours, 6);
+      marketHours   = pickFinite(cfg.emergencyMarketHours,   24);
+      log.warn(
+        `Snapshot prune: EMERGENCY mode (disk ${(usedFrac * 100).toFixed(1)}% used) — ` +
+        `forcing ${positionHours}h positions / ${marketHours}h markets`
+      );
+    }
+  }
+
   const now = Date.now();
-  const marketCutoff   = now - marketDays   * 24 * 60 * 60 * 1000;
-  const positionCutoff = now - positionDays * 24 * 60 * 60 * 1000;
+  const positionCutoff = now - positionHours * 60 * 60 * 1000;
+  const marketCutoff   = now - marketHours   * 60 * 60 * 1000;
   const markets   = deleteOldMarketSnapshots(marketCutoff);
   const positions = deleteOldPositionHistory(positionCutoff);
   if (markets > 0 || positions > 0) {
-    log.db(`Snapshot prune: ${markets} market rows (>${marketDays}d), ${positions} position rows (>${positionDays}d)`);
+    const winLabel = mode === "emergency"
+      ? `${positionHours}h pos / ${marketHours}h markets`
+      : `${positionDays}d pos / ${marketDays}d markets`;
+    log.db(`Snapshot prune [${mode}]: ${markets} market rows, ${positions} position rows (${winLabel})`);
   }
-  return { markets, positions };
+  return { markets, positions, mode };
+}
+
+function pickFinite(...vals) {
+  for (const v of vals) {
+    const n = Number(v);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return 0;
 }

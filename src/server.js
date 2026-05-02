@@ -50,6 +50,7 @@ import log, { logger } from "./logger.js";
 import { initMonitoring, captureException, flushMonitoring } from "./monitoring.js";
 import { checkClockSkew } from "./time-check.js";
 import { captureMarketSnapshot, captureWalletPositions, pruneOldSnapshots } from "./datacapture.js";
+import { getDiskUsage, fileSizeBytes, fmtBytes } from "./disk.js";
 import { HistoryReader } from "./backtest/history.js";
 import { filterLiquidMarkets, filterByLastTradePrice } from "./strategies/util.js";
 import { runBacktest } from "./backtest/engine.js";
@@ -795,6 +796,18 @@ app.get("/health", (_, res) => {
     dataCapture,
     degradationCandidates,
     markets: state.lastMarketFilter || null,
+    disk: (() => {
+      const u = getDiskUsage("./data");
+      const dbBytes = fileSizeBytes("./data/polytrack.db");
+      return u ? {
+        freeBytes:  u.freeBytes,
+        totalBytes: u.totalBytes,
+        usedFrac:   Math.round(u.usedFrac * 1000) / 1000,
+        dbBytes,
+        critical:   u.usedFrac >= 0.95,
+        emergency:  u.usedFrac >= 0.85,
+      } : null;
+    })(),
     consensusFilter: {
       // How many signals the entry-edge gate dropped on the most recent scan.
       // Healthy = some non-zero number on hot markets (means we're correctly
@@ -1598,9 +1611,31 @@ setImmediate(() => {
   try {
     const r = pruneOldSnapshots();
     if (r.markets > 0 || r.positions > 0) {
-      log.info(`Boot-time prune: removed ${r.markets} market + ${r.positions} position rows`);
+      log.info(`Boot-time prune [${r.mode}]: removed ${r.markets} market + ${r.positions} position rows`);
     }
   } catch (e) { log.warn(`Boot-time prune failed: ${e.message}`); }
+});
+
+// Boot-time disk-space check — production crashed 2026-05-02 with disk
+// 100% full and no clear log line announcing the situation. Now we log
+// disk + DB size at startup so the warning sign is visible in pm2 logs
+// before write failures cascade into login lockouts.
+setImmediate(() => {
+  try {
+    const usage = getDiskUsage("./data");
+    const dbSize = fileSizeBytes("./data/polytrack.db");
+    if (usage) {
+      const pct = (usage.usedFrac * 100).toFixed(1);
+      const line = `Disk: ${fmtBytes(usage.freeBytes)} free of ${fmtBytes(usage.totalBytes)} (${pct}% used) · DB: ${fmtBytes(dbSize)}`;
+      if (usage.usedFrac >= 0.95) {
+        log.error(`⚠ ${line} — CRITICAL, writes will fail soon`);
+      } else if (usage.usedFrac >= 0.85) {
+        log.warn(`⚠ ${line} — emergency-prune mode active`);
+      } else {
+        log.info(line);
+      }
+    }
+  } catch (e) { /* non-fatal */ }
 });
 
 // Daily SQLite backup at 03:00 local time — WAL-safe via sqlite3 .backup
