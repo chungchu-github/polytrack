@@ -80,7 +80,7 @@ describe("signals — consensus detection", () => {
   });
 
   it("skips when fewer than minWallets", () => {
-    // Pin minWallets=3 explicitly: default is now 2 (V1 accumulation override).
+    // Pin minWallets=3 explicitly: default is now 1 (single-ELITE follow).
     const store = new SignalStore({ minWallets: 3 });
     const wallets = [
       wallet("0x1", [pos("CID-A", "Yes")]),
@@ -89,15 +89,23 @@ describe("signals — consensus detection", () => {
     assert.equal(store.detect(wallets, [market("CID-A")]).length, 0);
   });
 
-  it("default minWallets=2 fires on 2 aligned ELITEs (V1 accumulation)", () => {
+  it("default minWallets=1 fires on a single aligned ELITE (single-ELITE follow)", () => {
+    const store = new SignalStore();
+    const wallets = [wallet("0x1", [pos("CID-A", "Yes")])];
+    const sigs = store.detect(wallets, [market("CID-A")]);
+    assert.equal(sigs.length, 1);
+    assert.equal(sigs[0].walletCount, 1);
+    assert.equal(sigs[0].direction, "YES");
+  });
+
+  it("single-ELITE skipped when another ELITE opposes (B8)", () => {
     const store = new SignalStore();
     const wallets = [
       wallet("0x1", [pos("CID-A", "Yes")]),
-      wallet("0x2", [pos("CID-A", "Yes")]),
+      wallet("0x2", [pos("CID-A", "No")]),
     ];
-    const sigs = store.detect(wallets, [market("CID-A")]);
-    assert.equal(sigs.length, 1);
-    assert.equal(sigs[0].walletCount, 2);
+    // aligned=1 / opposing=1 = 1.0 < 2 → suppress both directions
+    assert.equal(store.detect(wallets, [market("CID-A")]).length, 0);
   });
 });
 
@@ -204,8 +212,17 @@ describe("signals — filters", () => {
     assert.equal(store.detect(wallets, [market("CID-A")]).length, 0);
   });
 
-  it("includes PRO wallets when includeProInConsensus=true (V1 accumulation default)", () => {
-    const store = new SignalStore();   // default: includeProInConsensus=true
+  it("PRO wallets ignored under default (single-ELITE follow excludes PRO)", () => {
+    const store = new SignalStore();   // default: includeProInConsensus=false
+    const wallets = [
+      { addr: "0x1", tier: "PRO",  score: 60, positions: [pos("CID-A", "Yes")], updatedAt: RECENT_MS },
+      { addr: "0x2", tier: "PRO",  score: 60, positions: [pos("CID-A", "Yes")], updatedAt: RECENT_MS },
+    ];
+    assert.equal(store.detect(wallets, [market("CID-A")]).length, 0);
+  });
+
+  it("includes PRO wallets when includeProInConsensus=true (legacy 2-of-N config)", () => {
+    const store = new SignalStore({ includeProInConsensus: true, minWallets: 2 });
     const wallets = [
       { addr: "0x1", tier: "PRO",  score: 60, positions: [pos("CID-A", "Yes")], updatedAt: RECENT_MS },
       { addr: "0x2", tier: "PRO",  score: 60, positions: [pos("CID-A", "Yes")], updatedAt: RECENT_MS },
@@ -214,8 +231,8 @@ describe("signals — filters", () => {
     assert.equal(sigs.length, 1);
   });
 
-  it("ELITE + PRO mix forms a valid consensus (V1 accumulation realistic case)", () => {
-    const store = new SignalStore();
+  it("ELITE + PRO mix forms a valid consensus when explicitly enabled", () => {
+    const store = new SignalStore({ includeProInConsensus: true, minWallets: 2 });
     const wallets = [
       { addr: "0x1", tier: "ELITE", score: 80, positions: [pos("CID-A", "Yes")], updatedAt: RECENT_MS },
       { addr: "0x2", tier: "PRO",   score: 55, positions: [pos("CID-A", "Yes")], updatedAt: RECENT_MS },

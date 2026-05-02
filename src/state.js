@@ -17,7 +17,7 @@ export function createState(config = {}) {
   // so existing call sites (getSignals, markTraded) keep working.
   const consensus = engine.get("consensus");
   const signalStore = consensus?.store || new SignalStore({
-    minWallets: config.minWallets || 3,
+    minWallets: config.minWallets || 1,
     recencyDays: config.recencyDays || 7,
     minPositionSize: config.minPositionSize || 10,
   });

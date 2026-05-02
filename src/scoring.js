@@ -6,7 +6,7 @@
  * Score = winRate(0.25) + sharpe(0.25) + pnlPercentile(0.25) + timing(0.15) + consistency(0.10)
  *
  * Tier gates:
- *   ELITE: score > 70 AND >= 20 closed positions AND positive total PnL
+ *   ELITE: score > 75 AND >= 30 closed AND > $2000 profit AND > 5% ROI
  *   PRO:   score > 45 AND >= 10 closed positions
  *   BASIC: everything else
  */
@@ -283,13 +283,17 @@ export function scoreWallet(trades, positions = []) {
 
   const clampedScore = Math.max(0, Math.min(100, score));
 
-  // Tier assignment with hardened gates
+  // Tier assignment with hardened gates.
+  // 2026-05-02: tightened for single-ELITE follow mode — when one ELITE alone
+  // can trigger an auto-trade, the qualification bar must be high enough that
+  // any single follow-trade is defensible. Previous gate (score>70 / closed≥20
+  // / $500 / 2% ROI) admitted too much marginal-quality signal.
   let tier;
   if (
-    clampedScore > 70 &&
-    closedCount >= 20 &&
-    totalPnL > 500 &&                                    // minimum $500 profit (was $0)
-    totalVolume > 0 && (totalPnL / totalVolume) > 0.02   // minimum 2% ROI
+    clampedScore > 75 &&
+    closedCount >= 30 &&
+    totalPnL > 2000 &&                                   // minimum $2000 lifetime profit
+    totalVolume > 0 && (totalPnL / totalVolume) > 0.05   // minimum 5% ROI
   ) {
     tier = "ELITE";
   } else if (clampedScore > 45 && closedCount >= 10) {
