@@ -1683,7 +1683,7 @@ process.on("uncaughtException", (err) => {
 // ── Start ────────────────────────────────────────────────────────────────────
 httpServer.listen(PORT, HOST, async () => {
   log.info(`POLYTRACK v2.1.0 — listening on http://${HOST}:${PORT}`);
-  log.info(`Auto-copy: ${state.autoEnabled ? "ON" : "OFF"} | Max trade: $${MAX_TRADE_USDC} | Slippage: ${SLIPPAGE_PCT}% | Threshold: ${MIN_WALLETS}+ ELITE | Interval: ${SCAN_INTERVAL}s`);
+  log.info(`Auto-copy: ${state.autoEnabled ? "ON" : "OFF"} | Max trade: $${MAX_TRADE_USDC} | Slippage: ${SLIPPAGE_PCT}% | Mode: single-ELITE follow | Interval: ${SCAN_INTERVAL}s`);
   log.info(`Private key: ${PRIVATE_KEY ? "SET" : "NOT SET (simulated)"} | Auth: JWT (${countUsers()} users) | CORS: ${ALLOWED_ORIGINS.join(", ")}`);
   if (!PRIVATE_KEY || !FUNDER_ADDRESS) {
     log.warn("⚠ SIMULATION MODE — PRIVATE_KEY or FUNDER_ADDRESS not set. All trades will be simulated, no real orders will be placed.");

@@ -9,23 +9,23 @@
  */
 
 // ── Configuration ────────────────────────────────────────────────────────────
+// Single-ELITE follow mode (2026-05-02): 1 ELITE wallet entering same
+// direction triggers a signal, provided no other ELITE opposes the same
+// market+direction (B8 rule below handles the opposing check).
+//
+// The relaxed quorum is paired with three compensating safeties:
+//   1. Tightened ELITE gate (src/scoring.js): score>75, closed≥30,
+//      total PnL > $2000, ROI > 5%. Anyone who clears that bar should be
+//      defensible to follow alone.
+//   2. maxEntryDrift (below) blocks signals where market has already
+//      pumped past the ELITE's weighted-average entry by > 15¢.
+//   3. config.marketCooldownMin (30 min) + killSwitch.maxLifetimeLossUsdc
+//      ($30) cap blast radius if a follow trade goes bad.
 const DEFAULTS = {
   recencyDays: 7,         // only count positions with activity in last N days
   minPositionSize: 10,    // minimum USD position size to count
-  // V1 accumulation override (audit P0-1): with ELITE count growing slowly,
-  // 3 was unreachable for weeks. 2 is permissive enough to surface signals,
-  // tradeoff is more noise — entry-edge filter below catches stale ones.
-  // Raise back to 3 once eliteCount >= 5 stably.
-  minWallets: 2,
-  // V1 accumulation override (companion to minWallets): include PRO-tier
-  // wallets (score 45-70) in consensus, not just ELITE (>70). Rationale:
-  // with eliteCount=1 the 2-of-2 ELITE consensus is structurally rare;
-  // 1 ELITE + 1 PRO is much more likely and only marginally noisier
-  // (PRO wallets still have closed_positions >= 10 and score > 45).
-  // Strength formula uses avgScore so 1+1 mixed signals naturally
-  // weight lower than 2+ pure-ELITE. Flip to false once eliteCount
-  // is stably >= 5.
-  includeProInConsensus: true,
+  minWallets: 1,          // single ELITE follow
+  includeProInConsensus: false, // pure ELITE — PRO is watchlist only
   sizeCapPerWallet: 10000,// cap per-wallet weight at this USD value
   staleAfterScans: 3,     // mark STALE if not confirmed in N scans
   expireAfterScans: 6,    // mark EXPIRED after N scans without confirmation
@@ -34,6 +34,8 @@ const DEFAULTS = {
   // entry price, skip the signal — ELITE got their edge cheap and we'd be
   // chasing. Negative drift (we'd enter cheaper than ELITE) is fine.
   // 0.15 = 15¢ on a 0-1 prediction market scale. Set to null to disable.
+  // Especially important under single-ELITE follow — without consensus
+  // smoothing, this is the main protection against late entries.
   maxEntryDrift: 0.15,
 };
 

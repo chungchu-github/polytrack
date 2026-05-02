@@ -141,4 +141,33 @@ describe("scoreWallet", () => {
     assert.equal(result.tier, "BASIC");
     assert.equal(result.score, 0);
   });
+
+  it("ELITE gate (2026-05-02): score>75 + closed≥30 + $2000 PnL + ROI>5%", () => {
+    // 35 closed wins at $80 PnL each → totalPnL = $2800, ROI ≈ 80% (well above 5%)
+    const winSpec = (cid) => ({
+      conditionId: cid, title: cid, trades: [
+        { side: "BUY",  price: 0.10, size: 100 },
+        { side: "SELL", price: 0.90, size: 100 },
+      ],
+    });
+    const trades = makeTrades(Array.from({ length: 35 }, (_, i) => winSpec(`m${i}`)));
+    const r = scoreWallet(trades);
+    assert.equal(r.tier, "ELITE");
+    assert.ok(r.closedPositions >= 30);
+    assert.ok(r.totalPnL > 2000);
+  });
+
+  it("ELITE gate rejects 25 closed wins (under closed≥30 floor)", () => {
+    // Profitable but only 25 closed → must not be ELITE under tightened gate.
+    const winSpec = (cid) => ({
+      conditionId: cid, title: cid, trades: [
+        { side: "BUY",  price: 0.10, size: 100 },
+        { side: "SELL", price: 0.90, size: 100 },
+      ],
+    });
+    const trades = makeTrades(Array.from({ length: 25 }, (_, i) => winSpec(`m${i}`)));
+    const r = scoreWallet(trades);
+    assert.notEqual(r.tier, "ELITE");
+    assert.equal(r.closedPositions, 25);
+  });
 });

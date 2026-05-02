@@ -1,9 +1,13 @@
 /**
- * ConsensusStrategy — wraps the existing SignalStore (ELITE-wallet consensus
+ * ConsensusStrategy — wraps the existing SignalStore (ELITE-wallet follow
  * with NEW→CONFIRMED→STALE→EXPIRED lifecycle + B8 opposing suppression).
  *
- * Behaviour is preserved from pre-F2 `src/signals.js`. The only change is that
- * signals emitted through this strategy are tagged `strategy: "consensus"`.
+ * 2026-05-02: switched to single-ELITE follow mode. The "consensus" name is
+ * preserved (DB rows / config keys reference it) but the semantics are now
+ * "any one ELITE wallet enters → fire signal, unless another ELITE opposes
+ * the same market+direction." Pre-2026-05-02 behaviour was 2-of-N consensus
+ * including PRO wallets; that bar was structurally unreachable on the
+ * V1-accumulation watchlist.
  */
 import { BaseStrategy } from "./base.js";
 import { SignalStore } from "../signals.js";
@@ -14,9 +18,14 @@ export class ConsensusStrategy extends BaseStrategy {
       enabled: true,
       recencyDays: 7,
       minPositionSize: 10,
-      // V1-accumulation overrides — flip both back when eliteCount stably ≥ 5.
-      minWallets: 2,
-      includeProInConsensus: true,
+      // Single-ELITE follow: 1 ELITE same-direction with no opposing ELITE.
+      // Risk caps that compensate for the relaxed quorum:
+      //   - ELITE gate tightened (scoring.js: score>75, closed≥30, $2000, 5% ROI)
+      //   - maxEntryDrift 0.15 still blocks chasing past the smart-money entry
+      //   - marketCooldownMin (config.js, 30) prevents rapid re-fires per market
+      //   - killSwitch.maxLifetimeLossUsdc (config.js, 30) hard-stops on loss
+      minWallets: 1,
+      includeProInConsensus: false,
       sizeCapPerWallet: 10000,
       staleAfterScans: 3,
       expireAfterScans: 6,
