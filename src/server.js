@@ -422,11 +422,19 @@ async function runScan() {
           return [];
         })
       : [];
-    // Dedup. Priority order: active (freshest books) > tracked (relevant
-    // to consensus) > volume (broad sweep). First-seen wins.
+    // Dedup. Priority order: tracked (markets ELITE/PRO actually hold —
+    // strictly necessary for the signal engine to see anything) > active
+    // (freshest books) > volume (broad sweep). First-seen wins.
+    //
+    // 2026-05-02: was active>tracked>volume. With single-ELITE follow,
+    // signal hit-rate depends entirely on the scan window overlapping
+    // ELITE positions. Pre-swap diagnosis: 21 ELITE wallets held
+    // 107 distinct cids in the last 7d, but the 30-market cap was
+    // saturated by "active" markets and signals=0 across an entire
+    // accumulation cycle.
     const fetched = mergeMarketSourcesByCid(
-      fromActive,
-      mergeMarketSourcesByCid(fromTracked, fromVolume),
+      fromTracked,
+      mergeMarketSourcesByCid(fromActive, fromVolume),
     );
     log.scan(
       `Markets fetched: ${fromActive.length} active + ${fromTracked.length} tracked + ` +
@@ -458,7 +466,12 @@ async function runScan() {
     //    lastTradePrice field. Live diagnosis (2026-04-26): book showed
     //    0.01/0.99 sentinel, but lastTradePrice was 0.44 / 0.24 / 0.5 etc
     //    on the same markets — those are real, tradeable prices.
-    const filtered = filterByLastTradePrice(fetched, { cap: 30 });
+    // cap: 150 (was 30). Original conservative cap kept the per-scan
+    // signal-detection cost low, but starved the signal engine of any
+    // overlap with ELITE-held markets (see priority swap above). 150 is
+    // still cheap downstream — signal detection is O(markets × wallets)
+    // and runs in the low-ms range.
+    const filtered = filterByLastTradePrice(fetched, { cap: 150 });
     state.markets = filtered.events;
     state.lastMarketFilter = {
       ...filtered.stats,
