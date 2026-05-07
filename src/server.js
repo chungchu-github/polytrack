@@ -40,6 +40,7 @@ import {
 import {
   createState, hydrateFromDB, getWalletList, getSignals,
   addTrade, setWallet, removeWallet, restoreWallet, beginScan, endScan,
+  sortStaleFirst,
 } from "./state.js";
 import {
   initDB, closeDB, getStats as getDBStats, getStalePendingTrades,
@@ -500,8 +501,20 @@ async function runScan() {
       watchList = [...new Set([...lbAddrs, ...watchList])];
     } catch { log.warn("Leaderboard fetch failed, using seed + tracked wallets"); }
     const blacklisted = new Set(getBlacklistedWallets().map(w => w.address));
-    watchList = watchList.filter(a => !blacklisted.has(a)).slice(0, 50);
-    log.scan(`Watch list: ${watchList.length} wallets (${blacklisted.size} blacklisted)`);
+    watchList = watchList.filter(a => !blacklisted.has(a));
+    const totalCandidates = watchList.length;
+    // Stale-first ordering. With a 50-wallet cap and 265 tracked wallets,
+    // insertion-order traversal permanently starved the tail — wallets at
+    // index 50+ went unrescored for 12+ days, so a wallet whose tier should
+    // have flipped (e.g. BASIC → DEGEN under the gate added in PR #35) sat
+    // in the wrong tier indefinitely. Sorting oldest-rescore first means
+    // every wallet rotates through within `ceil(N/cap)` scans
+    // (≈ 5 scans / 5 min for N=265, cap=50).
+    // Wallets not yet present in state.wallets (fresh from leaderboard)
+    // have no DB row → updatedAt=undefined → sort to the front via the
+    // ?? 0 fallback.
+    watchList = sortStaleFirst(watchList, state.wallets).slice(0, 50);
+    log.scan(`Watch list: ${watchList.length}/${totalCandidates} wallets (${blacklisted.size} blacklisted, oldest-first)`);
 
     // 3. Load each wallet sequentially with rate limiting
     for (const addr of watchList) {
