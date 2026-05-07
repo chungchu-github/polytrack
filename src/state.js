@@ -177,3 +177,30 @@ export function beginScan() {
 export function endScan(scanId, stats) {
   db.completeScan(scanId, stats);
 }
+
+/**
+ * Sort wallet addresses oldest-rescore-first so the per-scan slice cap
+ * doesn't permanently starve the tail of the wallet pool.
+ *
+ * Background (2026-05-07): the scan loop caps each tick at 50 wallets to
+ * stay under Polymarket rate limits, but the watch list was
+ * insertion-ordered. With 265 tracked wallets that meant indexes 50+ went
+ * unrescored for 12+ days — a wallet whose tier should have flipped (e.g.
+ * BASIC → DEGEN under the gate added in PR #35) sat in the wrong tier
+ * indefinitely.
+ *
+ * Returns a NEW array (does not mutate input). Wallets not present in
+ * walletMap (fresh leaderboard discoveries) sort to the front via an
+ * `updatedAt = 0` fallback, ensuring new wallets get scored on first sight.
+ *
+ * @param {string[]} addrs    candidate wallet addresses
+ * @param {Map}      walletMap state.wallets
+ * @returns {string[]} addrs sorted oldest-rescore first
+ */
+export function sortStaleFirst(addrs, walletMap) {
+  return [...addrs].sort((a, b) => {
+    const ua = walletMap.get(a)?.updatedAt ?? 0;
+    const ub = walletMap.get(b)?.updatedAt ?? 0;
+    return ua - ub;
+  });
+}
