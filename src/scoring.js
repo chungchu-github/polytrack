@@ -298,6 +298,18 @@ export function scoreWallet(trades, positions = []) {
     tier = "ELITE";
   } else if (clampedScore > 45 && closedCount >= 10) {
     tier = "PRO";
+  } else if (
+    // DEGEN tier (2026-05-07): high-frequency, sustained-loss wallets — the
+    // "韭菜" pool that the antidegen strategy fades. Gates require enough
+    // trades to rule out bad luck (≥20 closed), real skin-in-the-game
+    // (>$500 lifetime volume) and a clearly-negative ROI (<-20%).
+    // Order matters: must come after ELITE/PRO so a profitable wallet can't
+    // be tagged DEGEN even if it churns a lot.
+    closedCount >= 20 &&
+    totalVolume > 500 &&
+    totalVolume > 0 && (totalPnL / totalVolume) < -0.20
+  ) {
+    tier = "DEGEN";
   } else {
     tier = "BASIC";
   }

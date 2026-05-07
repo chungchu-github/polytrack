@@ -467,7 +467,7 @@ function pickCurrentPriceForDirection(market, direction) {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function normalizeOutcome(outcome) {
+export function normalizeOutcome(outcome) {
   if (!outcome) return null;
   const lower = String(outcome).toLowerCase();
   if (lower === "yes" || lower === "0") return "YES";
@@ -479,7 +479,7 @@ function normalizeOutcome(outcome) {
  * Get the most recent trade timestamp for a wallet in a specific market.
  * Falls back to position update time.
  */
-function getLastActivity(wallet, conditionId) {
+export function getLastActivity(wallet, conditionId) {
   // Check recent trades first
   if (wallet.recentTrades) {
     const marketTrades = wallet.recentTrades.filter(t => t.conditionId === conditionId);

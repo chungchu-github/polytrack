@@ -11,6 +11,7 @@ import { ConsensusStrategy } from "./consensus.js";
 import { MomentumStrategy } from "./momentum.js";
 import { MeanRevStrategy } from "./meanrev.js";
 import { ArbitrageStrategy } from "./arbitrage.js";
+import { AntiDegenStrategy } from "./antidegen.js";
 
 export class StrategyEngine {
   /**
@@ -22,6 +23,7 @@ export class StrategyEngine {
     this.register(new MomentumStrategy(configByName.momentum || {}));
     this.register(new MeanRevStrategy(configByName.meanrev || {}));
     this.register(new ArbitrageStrategy(configByName.arbitrage || {}));
+    this.register(new AntiDegenStrategy(configByName.antidegen || {}));
     this.traded = new Set();
   }
 
@@ -51,12 +53,14 @@ export class StrategyEngine {
 
   markTraded(strategy, cid, dir) {
     this.traded.add(this._key(strategy, cid, dir));
-    // Mirror into consensus' SignalStore for backward compat
-    if (strategy === "consensus") this.get("consensus").markTraded(cid, dir);
+    // Mirror into stateful strategies' own signal stores
+    const s = this.get(strategy);
+    if (s && typeof s.markTraded === "function") s.markTraded(cid, dir);
   }
   unmarkTraded(strategy, cid, dir) {
     this.traded.delete(this._key(strategy, cid, dir));
-    if (strategy === "consensus") this.get("consensus").unmarkTraded(cid, dir);
+    const s = this.get(strategy);
+    if (s && typeof s.unmarkTraded === "function") s.unmarkTraded(cid, dir);
   }
   isTraded(strategy, cid, dir) {
     return this.traded.has(this._key(strategy, cid, dir));

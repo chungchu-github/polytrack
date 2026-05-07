@@ -58,6 +58,9 @@
   .badge-basic {
     @apply badge bg-surface-600/30 text-surface-400;
   }
+  .badge-degen {
+    @apply badge bg-danger/15 text-danger;
+  }
   .stat-value {
     @apply font-display text-2xl font-bold tabular-nums;
   }
