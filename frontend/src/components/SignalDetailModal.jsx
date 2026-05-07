@@ -88,6 +88,9 @@ export default function SignalDetailModal({ signal, onClose }) {
               )}>
                 {signal.direction}
               </span>
+              {signal.fade && (
+                <span className="badge bg-danger/15 text-danger">FADE</span>
+              )}
               <span className="text-2xs text-surface-500">
                 strength {signal.strength} · {signal.walletCount} wallets
               </span>
@@ -104,7 +107,7 @@ export default function SignalDetailModal({ signal, onClose }) {
 
         {/* Body */}
         <div className="px-5 py-4 min-h-[280px] max-h-[60vh] overflow-y-auto">
-          {stage === "details" && <DetailsStage context={context.data} loading={context.isLoading} error={context.error} />}
+          {stage === "details" && <DetailsStage context={context.data} loading={context.isLoading} error={context.error} fade={!!signal.fade} />}
           {stage === "preview" && <PreviewStage preview={preview.data} loading={preview.isLoading} size={size} onSizeChange={setSize} />}
           {stage === "status" && <StatusStage result={result} loading={execute.isPending} />}
         </div>
@@ -148,7 +151,7 @@ export default function SignalDetailModal({ signal, onClose }) {
   );
 }
 
-function DetailsStage({ context, loading, error }) {
+function DetailsStage({ context, loading, error, fade }) {
   if (loading) return <p className="text-sm text-surface-500">Loading supporting wallets…</p>;
   if (error) return <p className="text-sm text-danger">{error.message}</p>;
   if (!context) return null;
@@ -162,7 +165,9 @@ function DetailsStage({ context, loading, error }) {
       </div>
 
       <div>
-        <p className="text-2xs uppercase tracking-wider text-surface-500 mb-2">Supporting ELITE Wallets</p>
+        <p className="text-2xs uppercase tracking-wider text-surface-500 mb-2">
+          {fade ? "Fading DEGEN Wallets" : "Supporting ELITE Wallets"}
+        </p>
         <div className="space-y-1.5">
           {context.supporting.map(w => (
             <div key={w.addr} className="flex items-center justify-between rounded border border-surface-700 bg-surface-900/50 px-2.5 py-1.5">

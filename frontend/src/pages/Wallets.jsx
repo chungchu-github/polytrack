@@ -128,7 +128,7 @@ export default function Wallets() {
 
       {/* Tier Filter */}
       <div className="flex gap-2">
-        {["ALL", "ELITE", "PRO", "BASIC"].map(t => (
+        {["ALL", "ELITE", "PRO", "DEGEN", "BASIC"].map(t => (
           <button
             key={t}
             onClick={() => setTierFilter(t)}
@@ -321,7 +321,11 @@ function TrashSection({ open, onToggle, onRestore, restoring }) {
 }
 
 function TierBadge({ tier }) {
-  const cls = tier === "ELITE" ? "badge-elite" : tier === "PRO" ? "badge-pro" : "badge-basic";
+  const cls =
+    tier === "ELITE" ? "badge-elite" :
+    tier === "PRO"   ? "badge-pro"   :
+    tier === "DEGEN" ? "badge-degen" :
+                       "badge-basic";
   return <span className={cls}>{tier}</span>;
 }
 

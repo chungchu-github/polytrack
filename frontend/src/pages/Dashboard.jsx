@@ -13,6 +13,7 @@ const STRAT_COLORS = {
   momentum:  "bg-accent/15 text-accent",
   meanrev:   "bg-amber-500/15 text-amber-400",
   arbitrage: "bg-success/15 text-success",
+  antidegen: "bg-danger/15 text-danger",
 };
 
 export default function Dashboard() {
@@ -35,6 +36,7 @@ export default function Dashboard() {
 
   const eliteCount = wallets.filter(w => w.tier === "ELITE").length;
   const proCount = wallets.filter(w => w.tier === "PRO").length;
+  const degenCount = wallets.filter(w => w.tier === "DEGEN").length;
   const newSignals = signals.filter(s => s.status === "NEW" || s.status === "CONFIRMED");
   const recentTrades = trades.slice(0, 5);
 
@@ -67,16 +69,20 @@ export default function Dashboard() {
               label="Elite Wallets"
               value={eliteCount}
               accent="text-primary"
-              hint={wallets.length > 0 && eliteCount === 0
-                ? { text: "Need ≥20 closed positions + $500 PnL to qualify" }
-                : null}
+              hint={
+                degenCount > 0
+                  ? { text: `+ ${degenCount} DEGEN tracked for fade` }
+                  : wallets.length > 0 && eliteCount === 0
+                    ? { text: "Need ≥30 closed + $2000 PnL + 5% ROI to qualify" }
+                    : null
+              }
             />
             <StatCard
               label="Active Signals"
               value={newSignals.length}
               accent="text-accent"
-              hint={eliteCount === 0 && newSignals.length === 0
-                ? { text: "Signals appear when ≥3 ELITE wallets agree" }
+              hint={eliteCount === 0 && degenCount === 0 && newSignals.length === 0
+                ? { text: "Single-ELITE follow + DEGEN fade modes" }
                 : null}
             />
             <StatCard
@@ -103,10 +109,10 @@ export default function Dashboard() {
               title="No active signals"
               description={
                 wallets.length === 0
-                  ? "Add tracked wallets first — signals come from their consensus."
-                  : eliteCount === 0
-                    ? "Tracked wallets exist, but none qualify as ELITE yet. Wait for scoring to run, or add higher-quality wallets."
-                    : "Watching for ≥3 ELITE wallets to agree on a market."
+                  ? "Add tracked wallets first — signals come from ELITE follows and DEGEN fades."
+                  : eliteCount === 0 && degenCount === 0
+                    ? "Tracked wallets exist, but none qualify as ELITE or DEGEN yet. Wait for scoring."
+                    : "Watching ELITE entries (follow) and DEGEN entries (fade)."
               }
               action={
                 wallets.length === 0
@@ -138,6 +144,9 @@ export default function Dashboard() {
                       )}>
                         {sig.strategy || "consensus"}
                       </span>
+                      {sig.fade && (
+                        <span className="badge bg-danger/15 text-danger">FADE</span>
+                      )}
                       <span className="text-2xs text-surface-500">
                         {sig.walletCount} wallets · strength {sig.strength}
                       </span>

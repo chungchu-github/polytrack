@@ -157,6 +157,67 @@ describe("scoreWallet", () => {
     assert.ok(r.totalPnL > 2000);
   });
 
+  // ── DEGEN gate (2026-05-07): closed≥20 + ROI<-20% + vol>$500 ─────────────
+  it("DEGEN gate: 22 closed losses ROI=-62% vol=$880 → DEGEN", () => {
+    // per-market: BUY @0.80 size=50 → SELL @0.30 size=50
+    //   spent $40, received $15, PnL=-$25, vol $40
+    // total: closed=22, totalPnL=-$550, totalVolume=$880, ROI=-62.5%
+    const lossSpec = (cid) => ({
+      conditionId: cid, title: cid, trades: [
+        { side: "BUY",  price: 0.80, size: 50 },
+        { side: "SELL", price: 0.30, size: 50 },
+      ],
+    });
+    const trades = makeTrades(Array.from({ length: 22 }, (_, i) => lossSpec(`m${i}`)));
+    const r = scoreWallet(trades);
+    assert.equal(r.tier, "DEGEN");
+    assert.ok(r.closedPositions >= 20);
+    assert.ok(r.totalVolume > 500);
+    assert.ok((r.totalPnL / r.totalVolume) < -0.20);
+  });
+
+  it("DEGEN gate rejects vol $220 (under $500 floor)", () => {
+    // same loss profile, smaller size → vol below threshold
+    const lossSpec = (cid) => ({
+      conditionId: cid, title: cid, trades: [
+        { side: "BUY",  price: 0.80, size: 12.5 },
+        { side: "SELL", price: 0.30, size: 12.5 },
+      ],
+    });
+    const trades = makeTrades(Array.from({ length: 22 }, (_, i) => lossSpec(`m${i}`)));
+    const r = scoreWallet(trades);
+    assert.notEqual(r.tier, "DEGEN");
+    assert.ok(r.totalVolume < 500);
+  });
+
+  it("DEGEN gate rejects 15 closed losses (under closed≥20 floor)", () => {
+    const lossSpec = (cid) => ({
+      conditionId: cid, title: cid, trades: [
+        { side: "BUY",  price: 0.80, size: 50 },
+        { side: "SELL", price: 0.30, size: 50 },
+      ],
+    });
+    const trades = makeTrades(Array.from({ length: 15 }, (_, i) => lossSpec(`m${i}`)));
+    const r = scoreWallet(trades);
+    assert.notEqual(r.tier, "DEGEN");
+  });
+
+  it("DEGEN gate rejects ROI -18% (not negative enough)", () => {
+    // BUY @0.55 SELL @0.45 size=50, 22 markets
+    //   per-market: PnL=-$5, vol=$27.5
+    //   total: PnL=-$110, vol=$605, ROI=-18.2%
+    const lossSpec = (cid) => ({
+      conditionId: cid, title: cid, trades: [
+        { side: "BUY",  price: 0.55, size: 50 },
+        { side: "SELL", price: 0.45, size: 50 },
+      ],
+    });
+    const trades = makeTrades(Array.from({ length: 22 }, (_, i) => lossSpec(`m${i}`)));
+    const r = scoreWallet(trades);
+    assert.notEqual(r.tier, "DEGEN");
+    assert.ok((r.totalPnL / r.totalVolume) > -0.20);
+  });
+
   it("ELITE gate rejects 25 closed wins (under closed≥30 floor)", () => {
     // Profitable but only 25 closed → must not be ELITE under tightened gate.
     const winSpec = (cid) => ({

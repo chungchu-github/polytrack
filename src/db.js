@@ -39,6 +39,7 @@ export function initDB(dbPath) {
   migrateV10();
   migrateV11();
   migrateV12();
+  migrateV13();
   return db;
 }
 
@@ -330,6 +331,62 @@ function migrateV12() {
   if (!cols.includes("data_source")) {
     db.exec("ALTER TABLE wallets ADD COLUMN data_source TEXT DEFAULT 'live'");
   }
+}
+
+// ── Schema Migration v13 — antidegen dry-run signal log (2026-05-07) ────────
+// During the first-week observation period the antidegen strategy fires
+// signals but auto-copy is suppressed by a per-strategy dryRun flag. Each
+// would-be trade is persisted here so we can later mark-to-market the fade
+// quality without committing real capital.
+function migrateV13() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS dry_run_signals (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      strategy        TEXT NOT NULL,
+      condition_id    TEXT NOT NULL,
+      market_title    TEXT,
+      direction       TEXT NOT NULL,
+      fade            INTEGER DEFAULT 0,
+      strength        REAL,
+      wallet_addrs    TEXT,
+      degen_avg_entry REAL,
+      current_price   REAL,
+      fade_drift      REAL,
+      created_at      INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_dry_run_signals_created ON dry_run_signals(created_at);
+    CREATE INDEX IF NOT EXISTS idx_dry_run_signals_strategy ON dry_run_signals(strategy);
+  `);
+}
+
+/**
+ * Record a signal that would have triggered an auto-trade if the strategy's
+ * dryRun flag were off. Wallet addresses are joined as a comma-separated
+ * string (DEGEN address list for antidegen, ELITE list for consensus).
+ */
+export function recordDryRunSignal(_state, sig) {
+  const addrs = Array.isArray(sig.wallets)
+    ? sig.wallets.map(w => w.addr).filter(Boolean).join(",")
+    : (sig.fadeOf?.degenAddrs || []).join(",");
+  db.prepare(`
+    INSERT INTO dry_run_signals (
+      strategy, condition_id, market_title, direction, fade,
+      strength, wallet_addrs, degen_avg_entry, current_price, fade_drift,
+      created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    sig.strategy || "unknown",
+    sig.conditionId,
+    sig.title || null,
+    sig.direction,
+    sig.fade ? 1 : 0,
+    Number.isFinite(sig.strength) ? sig.strength : null,
+    addrs || null,
+    Number.isFinite(sig.degenAvgEntry) ? sig.degenAvgEntry : null,
+    Number.isFinite(sig.currentPrice)  ? sig.currentPrice  : null,
+    Number.isFinite(sig.fadeDrift)     ? sig.fadeDrift     : null,
+    Date.now()
+  );
 }
 
 // ── Schema Migration v10 — persist neg_risk per trade ──────────────────────

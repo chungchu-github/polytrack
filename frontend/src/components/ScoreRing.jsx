@@ -15,11 +15,13 @@ export default function ScoreRing({ score = 0, tier = "BASIC", size = SIZE, clas
   const color =
     tier === "ELITE" ? "stroke-primary" :
     tier === "PRO"   ? "stroke-accent" :
+    tier === "DEGEN" ? "stroke-danger" :
                        "stroke-surface-500";
 
   const textColor =
     tier === "ELITE" ? "text-primary" :
     tier === "PRO"   ? "text-accent" :
+    tier === "DEGEN" ? "text-danger" :
                        "text-surface-400";
 
   return (

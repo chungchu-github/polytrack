@@ -29,6 +29,16 @@ const DEFAULTS = {
     momentum:  { enabled: false, maxTradeUsdc: 50,  minStrength: 60, lookbackHours: 4, minPriceMovePct: 8 },
     meanrev:   { enabled: false, maxTradeUsdc: 50,  minStrength: 55, lookbackDays: 7,  zScoreThreshold: 2.0 },
     arbitrage: { enabled: false, maxTradeUsdc: 200, minStrength: 70, minEdgePct: 1.5 },
+    // antidegen (2026-05-07) — fade韭菜 strategy. dryRun=true locks first-week
+    // observation: signals fire and persist to dry_run_signals but auto-copy
+    // is skipped at the executeCopyTrade gate in server.js.
+    antidegen: {
+      enabled: true,
+      dryRun: true,
+      maxTradeUsdc: 5,         // 1/4 of consensus, even after dryRun is lifted
+      minStrength: 60,
+      marketCooldownMin: 60,   // tighter than consensus (30)
+    },
   },
   // P0 #4 — auto-exit / stop-loss for filled positions.
   // Disabled by default so existing deployments don't surprise-sell anything.

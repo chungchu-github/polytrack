@@ -61,6 +61,7 @@ import {
   createInvitationRow, getInvitation, markInvitationUsed, deleteInvitation,
   listInvitationsByAdmin,
   getBlacklistedWallets,
+  recordDryRunSignal,
 } from "./db.js";
 import {
   hashPassword, verifyPassword, signJwt, verifyJwt, getJwtSecret,
@@ -608,6 +609,16 @@ async function runScan() {
 
         // Concurrency lock — mark traded BEFORE execute to prevent double-fire
         state.strategyEngine.markTraded(strategyName, sig.conditionId, sig.direction);
+
+        // dryRun gate (per-strategy) — record the would-be trade to
+        // dry_run_signals and skip live execution. markTraded above prevents
+        // the same signal being re-recorded on every scan.
+        if (stratCfg.dryRun) {
+          log.info(`[dryRun] ${strategyName} ${sig.direction} ${sig.title?.slice(0,40)} (strength=${sig.strength})`);
+          try { recordDryRunSignal(state, sig); }
+          catch (e) { log.warn(`recordDryRunSignal failed: ${e.message}`); }
+          continue;
+        }
 
         try {
           const trade = await executeCopyTrade(sig, {
@@ -1696,7 +1707,18 @@ process.on("uncaughtException", (err) => {
 // ── Start ────────────────────────────────────────────────────────────────────
 httpServer.listen(PORT, HOST, async () => {
   log.info(`POLYTRACK v2.1.0 — listening on http://${HOST}:${PORT}`);
-  log.info(`Auto-copy: ${state.autoEnabled ? "ON" : "OFF"} | Max trade: $${MAX_TRADE_USDC} | Slippage: ${SLIPPAGE_PCT}% | Mode: single-ELITE follow | Interval: ${SCAN_INTERVAL}s`);
+  {
+    const cfg = loadConfig();
+    const stratStatus = (name) => {
+      const s = cfg.strategies?.[name] || {};
+      if (s.enabled === false) return `${name}(off)`;
+      if (s.dryRun) return `${name}(dryRun)`;
+      return `${name}(live)`;
+    };
+    const stratLine = ["consensus", "antidegen", "momentum", "meanrev", "arbitrage"]
+      .map(stratStatus).join(" ");
+    log.info(`Auto-copy: ${state.autoEnabled ? "ON" : "OFF"} | Max trade: $${MAX_TRADE_USDC} | Slippage: ${SLIPPAGE_PCT}% | Strategies: ${stratLine} | Interval: ${SCAN_INTERVAL}s`);
+  }
   log.info(`Private key: ${PRIVATE_KEY ? "SET" : "NOT SET (simulated)"} | Auth: JWT (${countUsers()} users) | CORS: ${ALLOWED_ORIGINS.join(", ")}`);
   if (!PRIVATE_KEY || !FUNDER_ADDRESS) {
     log.warn("⚠ SIMULATION MODE — PRIVATE_KEY or FUNDER_ADDRESS not set. All trades will be simulated, no real orders will be placed.");
