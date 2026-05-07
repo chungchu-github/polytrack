@@ -61,4 +61,24 @@ describe("config — load/save", () => {
     assert.equal(cfg.slippagePct, 5);
     assert.equal(cfg.maxTradeUsdc, 100); // default kept
   });
+
+  it("deep-seeds DEFAULTS.strategies entries missing from on-disk config", async () => {
+    // Reproduces the production bug where antidegen was added to DEFAULTS
+    // but didn't appear at runtime because the persisted config.json
+    // (written before antidegen existed) replaced the entire strategies
+    // block via shallow spread.
+    writeFileSync(CONFIG_PATH, JSON.stringify({
+      strategies: {
+        consensus: { enabled: true, maxTradeUsdc: 100, minStrength: 50 },
+        // intentionally no antidegen
+      },
+    }));
+    const { loadConfig } = await freshConfig();
+    const cfg = loadConfig();
+    assert.ok(cfg.strategies.antidegen, "antidegen must be seeded from DEFAULTS");
+    assert.equal(cfg.strategies.antidegen.dryRun, true);
+    assert.equal(cfg.strategies.antidegen.enabled, true);
+    // Existing entry preserved with disk values
+    assert.equal(cfg.strategies.consensus.maxTradeUsdc, 100);
+  });
 });

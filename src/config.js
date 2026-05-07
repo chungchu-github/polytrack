@@ -104,6 +104,28 @@ export function loadConfig() {
     if (existsSync(CONFIG_PATH)) {
       const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
       cache = { ...DEFAULTS, ...raw };
+      // Deep-seed nested object blocks so an older config.json (written
+      // before a new strategy / policy field existed) doesn't drop the
+      // newly-added DEFAULTS. Without this, e.g. adding `antidegen` to
+      // DEFAULTS.strategies has no effect on existing deployments because
+      // the shallow spread above replaces the entire `strategies` object.
+      // Reuses the same merge helpers as saveConfig() so behaviour is
+      // identical between load and save paths.
+      if (raw.strategies && typeof raw.strategies === "object") {
+        cache.strategies = mergeStrategies(DEFAULTS.strategies, raw.strategies);
+      }
+      if (raw.exitPolicy && typeof raw.exitPolicy === "object") {
+        cache.exitPolicy = mergeExitPolicy(DEFAULTS.exitPolicy, raw.exitPolicy);
+      }
+      if (raw.killSwitch && typeof raw.killSwitch === "object") {
+        cache.killSwitch = mergeKillSwitch(DEFAULTS.killSwitch, raw.killSwitch);
+      }
+      if (raw.retention && typeof raw.retention === "object") {
+        cache.retention = mergeRetention(DEFAULTS.retention, raw.retention);
+      }
+      if (raw.autoImport && typeof raw.autoImport === "object") {
+        cache.autoImport = mergeAutoImport(DEFAULTS.autoImport, raw.autoImport);
+      }
     } else {
       cache = { ...DEFAULTS };
     }
