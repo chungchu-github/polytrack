@@ -202,6 +202,40 @@ describe("scoreWallet", () => {
     assert.notEqual(r.tier, "DEGEN");
   });
 
+  it("DEGEN tier wins over PRO when both gates match (regression: 2026-05-07)", () => {
+    // 韭菜 with decent winrate but lossy ROI — produces score>45 (PRO gate)
+    // AND meets DEGEN gate (closed≥20, vol>$500, ROI<-20%). Pre-fix the
+    // PRO check ran first and ate the wallet; post-fix DEGEN takes priority.
+    //
+    // Pattern: half wins big at 0.10→0.90 (40% winrate boosts score),
+    // half losses small at 0.55→0.40 (slow bleed). With 22 markets the
+    // winrate ≈ 36%, total PnL clearly negative, but composite score
+    // still nudges over 45 from timing/consistency contributions.
+    const winSpec = (cid) => ({
+      conditionId: cid, title: cid, trades: [
+        { side: "BUY",  price: 0.30, size: 50 },
+        { side: "SELL", price: 0.45, size: 50 },
+      ],
+    });
+    const lossSpec = (cid) => ({
+      conditionId: cid, title: cid, trades: [
+        { side: "BUY",  price: 0.70, size: 50 },
+        { side: "SELL", price: 0.20, size: 50 },
+      ],
+    });
+    const trades = makeTrades([
+      ...Array.from({ length: 8  }, (_, i) => winSpec(`w${i}`)),
+      ...Array.from({ length: 14 }, (_, i) => lossSpec(`l${i}`)),
+    ]);
+    const r = scoreWallet(trades);
+    // Confirm BOTH gates would have matched
+    assert.ok(r.closedPositions >= 20);
+    assert.ok(r.totalVolume > 500);
+    assert.ok((r.totalPnL / r.totalVolume) < -0.20);
+    // The bug case: this fixture must produce DEGEN, not PRO
+    assert.equal(r.tier, "DEGEN", `tier ordering bug — got ${r.tier} score=${r.score}`);
+  });
+
   it("DEGEN gate rejects ROI -18% (not negative enough)", () => {
     // BUY @0.55 SELL @0.45 size=50, 22 markets
     //   per-market: PnL=-$5, vol=$27.5

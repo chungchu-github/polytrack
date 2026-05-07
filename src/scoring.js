@@ -296,20 +296,28 @@ export function scoreWallet(trades, positions = []) {
     totalVolume > 0 && (totalPnL / totalVolume) > 0.05   // minimum 5% ROI
   ) {
     tier = "ELITE";
-  } else if (clampedScore > 45 && closedCount >= 10) {
-    tier = "PRO";
   } else if (
     // DEGEN tier (2026-05-07): high-frequency, sustained-loss wallets — the
     // "韭菜" pool that the antidegen strategy fades. Gates require enough
     // trades to rule out bad luck (≥20 closed), real skin-in-the-game
     // (>$500 lifetime volume) and a clearly-negative ROI (<-20%).
-    // Order matters: must come after ELITE/PRO so a profitable wallet can't
-    // be tagged DEGEN even if it churns a lot.
+    //
+    // Order matters: DEGEN must come BEFORE PRO. The PRO gate (score>45 +
+    // closed≥10) has no ROI requirement, so a "韭菜" with decent winrate
+    // and timing can score >45 even while bleeding money — and would
+    // get tagged PRO instead of DEGEN if PRO were checked first. DEGEN
+    // gate is strictly more specific (3 hard conditions vs 2) so checking
+    // it first matches the intended tier semantics.
+    //
+    // Profitable wallets are still safe — `ROI > 0` rules out DEGEN, so
+    // they fall through to PRO/ELITE as before.
     closedCount >= 20 &&
     totalVolume > 500 &&
     totalVolume > 0 && (totalPnL / totalVolume) < -0.20
   ) {
     tier = "DEGEN";
+  } else if (clampedScore > 45 && closedCount >= 10) {
+    tier = "PRO";
   } else {
     tier = "BASIC";
   }
