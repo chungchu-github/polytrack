@@ -87,7 +87,15 @@ export class AntiDegenStrategy extends BaseStrategy {
             degenByDir[dir].push({
               addr: w.addr,
               score: w.score,
-              roi: w.totalROI,            // negative; used for strength weighting
+              // roi is stored in PERCENT units on the wallet object (e.g. -25
+              // for -25%) by both server.js loadWallet and state.js hydration.
+              // Reading w.totalROI (the original-name from scoreWallet's
+              // return shape) was a bug — those fields don't survive the
+              // mapping in loadWallet → setWallet, so lossFactor was always
+              // 0 and strength capped at sizeFactor*0.25 + countBonus*0.10
+              // (max 28). Production: 225 dryRun rows all had strength<30,
+              // even for high-loss DEGENs.
+              roi: w.roi ?? 0,
               posValue,
               weight,
               avgPrice: p.avgPrice,
