@@ -588,7 +588,34 @@ async function runScan() {
       }
     }
 
-    // 5. Auto-trade on NEW/CONFIRMED signals
+    // 5a. Dry-run observation pass — INDEPENDENT of state.autoEnabled.
+    //     Per-strategy `dryRun: true` records detect()-passing signals into
+    //     dry_run_signals so the operator can evaluate signal quality
+    //     without first enabling live auto-copy. minStrength is intentionally
+    //     NOT applied here — observation should capture the full strength
+    //     distribution so the threshold itself can be tuned post-hoc.
+    //     Pre-2026-05-08 this block sat inside `if (state.autoEnabled)`,
+    //     which made dryRun unreachable when auto-copy was OFF (the default
+    //     for first-week observation, which is exactly when dryRun matters).
+    {
+      const cfg = loadConfig();
+      for (const sig of signals) {
+        if (sig.status !== "NEW" && sig.status !== "CONFIRMED") continue;
+        const strategyName = sig.strategy || "consensus";
+        const stratCfg = cfg.strategies?.[strategyName] || {};
+        if (!stratCfg.dryRun) continue;
+        if (stratCfg.enabled === false) continue;
+        if (state.strategyEngine.isTraded(strategyName, sig.conditionId, sig.direction)) continue;
+        // Mark BEFORE record so re-fires of the same (cid, dir) don't
+        // duplicate rows on every scan.
+        state.strategyEngine.markTraded(strategyName, sig.conditionId, sig.direction);
+        log.info(`[dryRun] ${strategyName} ${sig.direction} ${sig.title?.slice(0,40)} (strength=${sig.strength})`);
+        try { recordDryRunSignal(state, sig); }
+        catch (e) { log.warn(`recordDryRunSignal failed: ${e.message}`); }
+      }
+    }
+
+    // 5b. Auto-trade on NEW/CONFIRMED signals — live execution path.
     if (state.autoEnabled) {
       for (const sig of signals) {
         if (sig.status !== "NEW" && sig.status !== "CONFIRMED") continue;
@@ -599,6 +626,8 @@ async function runScan() {
         const cfg = loadConfig();
         const stratCfg = cfg.strategies?.[strategyName] || {};
         if (stratCfg.enabled === false) continue;
+        // dryRun strategies were handled in 5a; never live-execute them.
+        if (stratCfg.dryRun) continue;
         const minStrength = stratCfg.minStrength ?? cfg.minSignalStrength ?? 0;
         if (sig.strength < minStrength) continue;
 
@@ -622,16 +651,6 @@ async function runScan() {
 
         // Concurrency lock — mark traded BEFORE execute to prevent double-fire
         state.strategyEngine.markTraded(strategyName, sig.conditionId, sig.direction);
-
-        // dryRun gate (per-strategy) — record the would-be trade to
-        // dry_run_signals and skip live execution. markTraded above prevents
-        // the same signal being re-recorded on every scan.
-        if (stratCfg.dryRun) {
-          log.info(`[dryRun] ${strategyName} ${sig.direction} ${sig.title?.slice(0,40)} (strength=${sig.strength})`);
-          try { recordDryRunSignal(state, sig); }
-          catch (e) { log.warn(`recordDryRunSignal failed: ${e.message}`); }
-          continue;
-        }
 
         try {
           const trade = await executeCopyTrade(sig, {
