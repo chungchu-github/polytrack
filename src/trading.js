@@ -220,7 +220,14 @@ export async function signOrder({ privateKey, orderData, domain }) {
  * F1 building block — serialise a signed order into the JSON wire body the
  * CLOB `/order` endpoint expects. BigInts → decimal strings, side 0/1 → "BUY"/"SELL".
  */
-export function wrapOrderPayload({ orderData, signature, orderType = "FOK" }) {
+export function wrapOrderPayload({ orderData, signature, orderType = "FOK", owner, deferExec = false }) {
+  // `owner` (the apiKey UUID) is required by Polymarket V2 — without it
+  // POST /order returns "Invalid order payload" (verified 2026-05-10 against
+  // the Tokyo VPS once the geoblock cleared). Polymarket uses it to bind the
+  // order to the API key for cancellation and rate-limiting purposes.
+  // Defaults to env POLY_API_KEY so existing call sites that don't pass it
+  // still work for self-hosted deployments.
+  const ownerKey = owner ?? process.env.POLY_API_KEY;
   return {
     order: {
       salt:          orderData.salt.toString(),
@@ -236,7 +243,9 @@ export function wrapOrderPayload({ orderData, signature, orderType = "FOK" }) {
       builder:       orderData.builder,
       signature,
     },
+    owner:    ownerKey,
     orderType,
+    deferExec,
   };
 }
 
