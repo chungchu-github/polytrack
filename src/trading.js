@@ -42,13 +42,20 @@ const BUILDER_CODE = process.env.POLY_BUILDER_CODE || "";
 export const SIGNATURE_TYPE_EOA             = 0;
 export const SIGNATURE_TYPE_POLY_PROXY       = 1;
 export const SIGNATURE_TYPE_POLY_GNOSIS_SAFE = 2;
+// POLY_1271 (added 2026-05-10): the V2 deposit-wallet flow. New API users
+// onboard through this. Signature is verified via ERC-1271 against the
+// deposit wallet smart contract (funder address). Existing Magic-Link
+// accounts may also be migrated to this. Symptom of using the wrong type:
+// CLOB POST /order returns "maker address not allowed, please use the
+// deposit wallet".
+export const SIGNATURE_TYPE_POLY_1271        = 3;
 
 function getDefaultSignatureType() {
   const raw = process.env.POLY_SIGNATURE_TYPE;
   if (raw == null || raw === "") return SIGNATURE_TYPE_POLY_PROXY;
   const n = Number(raw);
-  if (![0, 1, 2].includes(n)) {
-    throw new Error(`POLY_SIGNATURE_TYPE must be 0, 1, or 2 (got "${raw}")`);
+  if (![0, 1, 2, 3].includes(n)) {
+    throw new Error(`POLY_SIGNATURE_TYPE must be 0, 1, 2, or 3 (got "${raw}")`);
   }
   return n;
 }
@@ -191,10 +198,21 @@ export function buildUnsignedOrder({
   const builderBytes = builderCodeToBytes32(builderCode ?? BUILDER_CODE);
   const sigType = signatureType ?? getDefaultSignatureType();
 
+  // For POLY_1271 the on-chain Order.signer is the deposit-wallet smart
+  // contract itself (== maker == funder); CLOB then verifies the EIP-712
+  // signature via ERC-1271 against that contract. Mirrors py-clob-client-v2
+  // ::OrderBuilder._v2_order_signer().
+  // For EOA / POLY_PROXY / GNOSIS_SAFE the signer remains the user's EOA
+  // (the address derived from PRIVATE_KEY), and the contract recovers the
+  // signature against that EOA directly.
+  const orderSigner = sigType === SIGNATURE_TYPE_POLY_1271
+    ? funderAddress
+    : signerAddress;
+
   const orderData = {
     salt,
     maker:         funderAddress,
-    signer:        signerAddress,
+    signer:        orderSigner,
     tokenId:       BigInt(tokenId),
     makerAmount,
     takerAmount,
