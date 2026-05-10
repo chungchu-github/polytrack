@@ -641,8 +641,16 @@ async function runScan() {
           continue;
         }
 
+        // Resolve effective trade size FIRST so the risk gate and the actual
+        // trade agree. Pre-fix: risk gate used cfg.maxTradeUsdc ($100 default)
+        // while executeCopyTrade used stratCfg.maxTradeUsdc ($5 for antidegen).
+        // Under liveTestCapUsdc=$50 this caused 100% rejection of antidegen
+        // signals: gate computed $0 + $100 = $100 > $50 every time, even
+        // though the actual order would only spend $5.
+        const tradeSize = stratCfg.maxTradeUsdc || cfg.maxTradeUsdc;
+
         // Risk gate — daily loss / exposure / cooldown / V3 live-test cap
-        const risk = checkRiskLimits(state, sig.conditionId, cfg.maxTradeUsdc, cfg);
+        const risk = checkRiskLimits(state, sig.conditionId, tradeSize, cfg);
         if (!risk.ok) {
           log.warn(`Risk gate blocked [${sig.direction}] ${sig.title?.slice(0,40)}: ${risk.reason}`);
           alertRiskBlocked(sig, risk.reason);
@@ -656,7 +664,7 @@ async function runScan() {
           const trade = await executeCopyTrade(sig, {
             privateKey: PRIVATE_KEY,
             funderAddress: FUNDER_ADDRESS,
-            maxTradeUsdc: stratCfg.maxTradeUsdc || cfg.maxTradeUsdc,
+            maxTradeUsdc: tradeSize,
             slippagePct: cfg.slippagePct,
           });
           trade.strategy = strategyName;
@@ -678,12 +686,12 @@ async function runScan() {
           tradeFailureStreak++;
           log.error("Auto-trade failed:", e.message);
           captureException(e, { scope: "auto-trade", conditionId: sig.conditionId, direction: sig.direction });
-          alertTradeFailed({ title: sig.title, conditionId: sig.conditionId, direction: sig.direction, size: cfg.maxTradeUsdc }, e.message);
+          alertTradeFailed({ title: sig.title, conditionId: sig.conditionId, direction: sig.direction, size: tradeSize }, e.message);
           addTrade(state, {
             conditionId: sig.conditionId,
             title: sig.title,
             direction: sig.direction,
-            size: cfg.maxTradeUsdc,
+            size: tradeSize,
             status: "ERROR",
             error: e.message,
             executedAt: Date.now(),
