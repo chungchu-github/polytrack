@@ -1750,6 +1750,9 @@ httpServer.listen(PORT, HOST, async () => {
     const stratLine = ["consensus", "antidegen", "momentum", "meanrev", "arbitrage"]
       .map(stratStatus).join(" ");
     log.info(`Auto-copy: ${state.autoEnabled ? "ON" : "OFF"} | Max trade: $${MAX_TRADE_USDC} | Slippage: ${SLIPPAGE_PCT}% | Strategies: ${stratLine} | Interval: ${SCAN_INTERVAL}s`);
+    if (Number(cfg.liveTestCapUsdc || 0) > 0) {
+      log.info(`⚠ LIVE-TEST MODE — liveTestCapUsdc=$${cfg.liveTestCapUsdc}. Cumulative auto-trade USDC will hard-stop at this cap. V1 Gate bypassed.`);
+    }
   }
   log.info(`Private key: ${PRIVATE_KEY ? "SET" : "NOT SET (simulated)"} | Auth: JWT (${countUsers()} users) | CORS: ${ALLOWED_ORIGINS.join(", ")}`);
   if (!PRIVATE_KEY || !FUNDER_ADDRESS) {

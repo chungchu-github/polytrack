@@ -76,7 +76,10 @@ describe("config — load/save", () => {
     const { loadConfig } = await freshConfig();
     const cfg = loadConfig();
     assert.ok(cfg.strategies.antidegen, "antidegen must be seeded from DEFAULTS");
-    assert.equal(cfg.strategies.antidegen.dryRun, true);
+    // dryRun was true during the first-week observation lock; flipped to
+    // false on 2026-05-10 for the smoke-test launch (liveTestCapUsdc=$50).
+    // The deep-seed contract still holds — just assert the field is present.
+    assert.equal(typeof cfg.strategies.antidegen.dryRun, "boolean");
     assert.equal(cfg.strategies.antidegen.enabled, true);
     // Existing entry preserved with disk values
     assert.equal(cfg.strategies.consensus.maxTradeUsdc, 100);

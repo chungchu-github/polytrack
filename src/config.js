@@ -22,7 +22,12 @@ const DEFAULTS = {
   maxTotalExposureUsdc: 1000,
   marketCooldownMin: 30,
   webhookUrl: "",             // Discord/Slack webhook
-  liveTestCapUsdc: 0,         // V3: 0=disabled; >0 caps lifetime auto-trade USDC
+  // V3: 0=disabled; >0 caps lifetime auto-trade USDC AND bypasses V1 Gate.
+  // Smoke-test launch (2026-05-10): set to 50 to validate end-to-end pipeline
+  // (CLOB submit → fill → fee accounting → killSwitch wiring) with real $50
+  // pUSD on Polymarket. After ~10 trades worth of real fills, raise or lower
+  // based on what we learn about slippage and fee model.
+  liveTestCapUsdc: 50,
   // F2: per-strategy settings. Only `consensus` is enabled by default.
   strategies: {
     consensus: { enabled: true,  maxTradeUsdc: 100, minStrength: 50 },
@@ -34,7 +39,12 @@ const DEFAULTS = {
     // is skipped at the executeCopyTrade gate in server.js.
     antidegen: {
       enabled: true,
-      dryRun: true,
+      // Smoke-test (2026-05-10): flipped to false to fire actual orders
+      // against the $50 liveTestCapUsdc pool. Trade-off: server.js 5a no
+      // longer records to dry_run_signals when dryRun=false, so the backtest
+      // table stops growing — but the 544-row historical sample is preserved,
+      // and the 'trades' table now provides real-fill ground truth.
+      dryRun: false,
       maxTradeUsdc: 5,         // 1/4 of consensus, even after dryRun is lifted
       minStrength: 60,
       marketCooldownMin: 60,   // tighter than consensus (30)
