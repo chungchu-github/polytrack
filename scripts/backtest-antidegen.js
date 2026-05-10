@@ -35,14 +35,19 @@ const rows = db.prepare(`
 console.log(`Loaded ${rows.length} signals (strength≥${minStrength}, last ${hoursBack}h)\n`);
 if (!rows.length) process.exit(0);
 
-// Batch fetch all markets in one call
+// Batch fetch in chunks of 50; gamma API expects REPEATED condition_ids params,
+// not comma-CSV (per src/polymarket-api.js:271).
 const cids = [...new Set(rows.map(r => r.condition_id))];
-const url = `${GAMMA}?condition_ids=${cids.join(",")}&limit=200`;
-const resp = await fetch(url);
-const markets = await resp.json();
 const byCid = new Map();
-for (const m of markets) byCid.set(m.conditionId, m);
-console.log(`Fetched ${markets.length}/${cids.length} markets from gamma\n`);
+for (let i = 0; i < cids.length; i += 50) {
+  const chunk = cids.slice(i, i + 50);
+  const qs = chunk.map(c => `condition_ids=${encodeURIComponent(c)}`).join("&");
+  const resp = await fetch(`${GAMMA}?${qs}&limit=${chunk.length}`);
+  const ms = await resp.json();
+  if (!Array.isArray(ms)) continue;
+  for (const m of ms) byCid.set(m.conditionId, m);
+}
+console.log(`Fetched ${byCid.size}/${cids.length} markets from gamma\n`);
 
 let settled = { win: 0, loss: 0, pnl: 0, count: 0 };
 let open    = { pnl: 0, count: 0 };
