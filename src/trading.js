@@ -181,7 +181,13 @@ export function buildUnsignedOrder({
     takerAmount = BigInt(Math.round(tokenQty * price * 1e6));       // USDC we want
   }
 
-  const salt = BigInt("0x" + ethers.hexlify(ethers.randomBytes(8)).slice(2));
+  // Match py-clob-client-v2's generate_order_salt(): random * ms-epoch.
+  // Produces values ≤ ~2^41, which is well within Number.MAX_SAFE_INTEGER
+  // (2^53), so the wire body can emit salt as a JSON integer without
+  // precision loss. Earlier we used 8 random bytes (BigInt up to 2^64) and
+  // stringified, but Polymarket V2 server expects a JSON integer per
+  // py-clob-client-v2's order_to_json_v2 output.
+  const salt = Math.floor(Math.random() * Date.now());
   const builderBytes = builderCodeToBytes32(builderCode ?? BUILDER_CODE);
   const sigType = signatureType ?? getDefaultSignatureType();
 
@@ -197,6 +203,11 @@ export function buildUnsignedOrder({
     timestamp:     BigInt(Date.now()),    // ms — replaces nonce for uniqueness
     metadata:      ZERO_BYTES32,
     builder:       builderBytes,
+    // expiration is NOT part of the EIP-712 signed struct (V2 dropped it
+    // from the on-chain Order tuple per py-clob-client-v2/order_utils/
+    // exchange_order_builder_v2.py:ORDER_TYPE_STRING), but the off-chain
+    // CLOB matcher still requires it on the wire. "0" = GTC.
+    expiration:    "0",
   };
 
   return {
@@ -220,23 +231,26 @@ export async function signOrder({ privateKey, orderData, domain }) {
  * F1 building block — serialise a signed order into the JSON wire body the
  * CLOB `/order` endpoint expects. BigInts → decimal strings, side 0/1 → "BUY"/"SELL".
  */
-export function wrapOrderPayload({ orderData, signature, orderType = "FOK", owner, deferExec = false }) {
-  // `owner` (the apiKey UUID) is required by Polymarket V2 — without it
-  // POST /order returns "Invalid order payload" (verified 2026-05-10 against
-  // the Tokyo VPS once the geoblock cleared). Polymarket uses it to bind the
-  // order to the API key for cancellation and rate-limiting purposes.
-  // Defaults to env POLY_API_KEY so existing call sites that don't pass it
-  // still work for self-hosted deployments.
+export function wrapOrderPayload({ orderData, signature, orderType = "FOK", owner, deferExec = false, postOnly = false }) {
+  // Wire shape matches py-clob-client-v2/order_utils/model/order_data_v2.py
+  // :order_to_json_v2() exactly. Mismatches cause "Invalid order payload"
+  // 401 — the V2 server validates the body shape strictly:
+  //   - salt as JSON integer (not string), produced from a Number-safe
+  //     random in buildUnsignedOrder so JSON.stringify doesn't lose digits
+  //   - expiration string at order level ("0" = GTC), separate from the
+  //     EIP-712 signed struct
+  //   - owner (apiKey UUID), orderType, deferExec, postOnly at top level
   const ownerKey = owner ?? process.env.POLY_API_KEY;
   return {
     order: {
-      salt:          orderData.salt.toString(),
+      salt:          orderData.salt,                       // JSON integer
       maker:         orderData.maker,
       signer:        orderData.signer,
       tokenId:       orderData.tokenId.toString(),
       makerAmount:   orderData.makerAmount.toString(),
       takerAmount:   orderData.takerAmount.toString(),
       side:          orderData.side === 1 ? "SELL" : "BUY",
+      expiration:    orderData.expiration ?? "0",
       signatureType: orderData.signatureType,
       timestamp:     orderData.timestamp.toString(),
       metadata:      orderData.metadata,
@@ -246,6 +260,7 @@ export function wrapOrderPayload({ orderData, signature, orderType = "FOK", owne
     owner:    ownerKey,
     orderType,
     deferExec,
+    postOnly,
   };
 }
 
