@@ -106,13 +106,25 @@ export function lifetimeAutoTradeUsdc(state) {
 }
 
 /**
- * Timestamp of the most recent trade attempt on a given market (any direction, any status).
- * Returns 0 if no prior trade.
+ * Timestamp of the most recent SUCCESSFUL trade attempt on a given market.
+ * Returns 0 if no prior successful trade.
+ *
+ * Statuses that count: FILLED, PARTIAL, MATCHED, SIMULATED — anything that
+ * deployed (or would have deployed) capital. FAILED/ERROR/REJECTED/CANCELED
+ * are EXCLUDED so a payload bug or transient API glitch can't lock the
+ * market for the full cooldown window. Without this, fixing a bug and
+ * retrying the same condition forced a 60-minute wait per cid — verified
+ * 2026-05-10 after the V2 owner-field fix landed.
  */
+const COOLDOWN_COUNTING_STATUSES = new Set([
+  "FILLED", "PARTIAL", "MATCHED", "SIMULATED",
+]);
+
 export function lastMarketTradeTs(state, conditionId) {
   let last = 0;
   for (const t of state.autoTrades) {
     if (t.conditionId !== conditionId) continue;
+    if (!COOLDOWN_COUNTING_STATUSES.has(t.status)) continue;
     if ((t.executedAt || 0) > last) last = t.executedAt;
   }
   return last;

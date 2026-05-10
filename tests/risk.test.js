@@ -164,14 +164,26 @@ describe("risk — lastMarketTradeTs", () => {
   it("returns 0 for untouched market", () => {
     assert.equal(lastMarketTradeTs(mkState([]), "X"), 0);
   });
-  it("returns max executedAt across all statuses", () => {
+  it("counts only FILLED/PARTIAL/MATCHED/SIMULATED — ignores FAILED/ERROR", () => {
+    // Regression: pre-2026-05-10 a FAILED trade locked the market for the
+    // full cooldown window, blocking retries even after we'd fixed the
+    // underlying bug. Only successful trades should consume cooldown.
     const now = Date.now();
     const state = mkState([
-      { conditionId: "X", executedAt: now - 10_000, status: "ERROR" },
-      { conditionId: "X", executedAt: now,          status: "FILLED" },
-      { conditionId: "Y", executedAt: now + 1,      status: "FILLED" },
+      { conditionId: "X", executedAt: now - 10_000, status: "FILLED" },
+      { conditionId: "X", executedAt: now,          status: "ERROR" },   // ignored
+      { conditionId: "X", executedAt: now,          status: "FAILED" },  // ignored
     ]);
-    assert.equal(lastMarketTradeTs(state, "X"), now);
+    // Still returns the FILLED timestamp (oldest), not the ERROR timestamp.
+    assert.equal(lastMarketTradeTs(state, "X"), now - 10_000);
+  });
+  it("returns 0 when only failed trades exist", () => {
+    const now = Date.now();
+    const state = mkState([
+      { conditionId: "X", executedAt: now,          status: "ERROR" },
+      { conditionId: "X", executedAt: now - 5_000,  status: "FAILED" },
+    ]);
+    assert.equal(lastMarketTradeTs(state, "X"), 0);
   });
 });
 
