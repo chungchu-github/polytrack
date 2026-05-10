@@ -57,16 +57,18 @@ try {
 //    treats as the funder. The endpoint requires HMAC-signed L2 headers — for
 //    Magic-proxy users the response includes the proxy address.
 if (POLY_API_KEY && POLY_API_SECRET && POLY_PASSPHRASE) {
-  console.log("\n[3] clob /balance-allowance (L2 authenticated)");
+  console.log("\n[3] clob /data/orders (L2 authenticated)");
   try {
     const { buildL2Headers } = await import("../src/clob-auth.js");
     // Try with both EOA and (no funder) — the response payload includes the
     // address-of-record that Polymarket associates with the API key.
-    // Polymarket CLOB: GET /balance-allowance?asset_type=COLLATERAL returns USDC.
-    // HMAC path must include the query string verbatim.
-    const path = "/balance-allowance?asset_type=COLLATERAL";
-    // Try both addresses: EOA (signer) and any FUNDER_ADDRESS in .env.
+    // V2 endpoint per docs: GET /data/orders (returns user's orders, L2-auth).
+    // Was /balance-allowance in V1 — that's been retired, hence the 401s
+    // returned in earlier runs (path didn't match any V2 route, but the auth
+    // middleware still rejected before the 404 layer).
+    const path = "/data/orders";
     // Polymarket validates POLY_ADDRESS against the API key's bound address.
+    // For POLY_PROXY (sigType=1), the bound address is the signer EOA.
     for (const addr of [eoa, process.env.FUNDER_ADDRESS].filter(Boolean)) {
       const headers = buildL2Headers({
         method: "GET", path,
