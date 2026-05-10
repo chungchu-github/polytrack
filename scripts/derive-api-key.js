@@ -21,7 +21,7 @@
  */
 
 import dotenv from "dotenv";
-import { deriveApiKey } from "../src/clob-auth.js";
+import { createOrDeriveApiKey } from "../src/clob-auth.js";
 
 dotenv.config();
 
@@ -44,7 +44,7 @@ async function main() {
 
   let creds;
   try {
-    creds = await deriveApiKey({ privateKey: PRIVATE_KEY, clobUrl });
+    creds = await createOrDeriveApiKey({ privateKey: PRIVATE_KEY, clobUrl });
   } catch (e) {
     bail("derive-api-key call failed", e?.stack || e.message);
   }

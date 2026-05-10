@@ -110,6 +110,54 @@ export async function deriveApiKey({ privateKey, clobUrl }) {
   return { apiKey: data.apiKey, secret: data.secret, passphrase: data.passphrase };
 }
 
+/**
+ * Create new L2 credentials via POST /auth/api-key. Use when the wallet has
+ * never been bound — derive returns HTTP 400 in that case. After first POST
+ * the credentials are stable; subsequent derive() calls return the same
+ * triple. This mirrors py-clob-client-v2's `create_or_derive_api_key()`.
+ *
+ * Per Polymarket auth docs (2026-05): same L1 EIP-712 headers, just POST
+ * instead of GET to a different path.
+ */
+export async function createApiKey({ privateKey, clobUrl }) {
+  const base = clobUrl || process.env.POLY_CLOB_URL || "https://clob.polymarket.com";
+  const auth = await signClobAuth({ privateKey });
+  const headers = {
+    "Content-Type": "application/json",
+    ...buildL1Headers(auth),
+  };
+  const res = await fetch(`${base}/auth/api-key`, {
+    method: "POST",
+    headers,
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`create-api-key failed: HTTP ${res.status} ${text.slice(0, 200)}`);
+  }
+  const data = await res.json();
+  if (!data?.apiKey || !data?.secret || !data?.passphrase) {
+    throw new Error(`create-api-key returned malformed payload: ${JSON.stringify(data).slice(0, 200)}`);
+  }
+  return { apiKey: data.apiKey, secret: data.secret, passphrase: data.passphrase };
+}
+
+/**
+ * SDK-equivalent of `createOrDeriveApiKey()` — try derive first; if the
+ * server says "no credentials exist" (HTTP 400), fall back to create.
+ * Returns the same `{apiKey, secret, passphrase}` triple in both branches.
+ */
+export async function createOrDeriveApiKey({ privateKey, clobUrl }) {
+  try {
+    return await deriveApiKey({ privateKey, clobUrl });
+  } catch (e) {
+    // Only fall through on the specific "no key yet" error. Network /
+    // signature errors should still bubble.
+    if (!/HTTP 400/.test(e.message)) throw e;
+    return await createApiKey({ privateKey, clobUrl });
+  }
+}
+
 // ── L2: HMAC-SHA256 headers ─────────────────────────────────────────────────
 
 /**
