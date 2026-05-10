@@ -80,17 +80,20 @@ describe("L2: HMAC-SHA256 headers", () => {
     const path = "/order/abc";
     const body = "";
 
+    // V2 server validates against py-clob-client-v2's `urlsafe_b64encode`,
+    // which keeps `=` padding. Stripping it produced 401 in production
+    // (see clob-auth.js:computeHmac note). Reference HMAC must keep padding.
     const expected = crypto
       .createHmac("sha256", Buffer.from(SECRET_B64, "base64"))
       .update(`${ts}${method}${path}${body}`)
       .digest("base64")
-      .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+      .replace(/\+/g, "-").replace(/\//g, "_");
 
     const got = computeHmac({ secret: SECRET_B64, timestamp: ts, method, path, body });
     assert.equal(got, expected);
   });
 
-  it("output is base64url — no +, /, or = characters", () => {
+  it("output is URL-safe base64 with padding — no + or / chars, but = is OK", () => {
     const sig = computeHmac({
       secret: Buffer.from("a-reasonably-long-test-secret-key-for-hmac-sha256").toString("base64"),
       timestamp: "1700000000",
@@ -100,8 +103,10 @@ describe("L2: HMAC-SHA256 headers", () => {
     });
     assert.ok(!sig.includes("+"), `signature contains +: ${sig}`);
     assert.ok(!sig.includes("/"), `signature contains /: ${sig}`);
-    assert.ok(!sig.includes("="), `signature contains =: ${sig}`);
-    assert.match(sig, /^[A-Za-z0-9_-]+$/, `signature not base64url: ${sig}`);
+    // SHA-256 produces 32 bytes → urlsafe_b64encode is 44 chars including
+    // a single trailing '=' (Python parity). Strip-on-emit produced 401s.
+    assert.match(sig, /^[A-Za-z0-9_-]+=$/, `expected single-= padded URL-safe base64: ${sig}`);
+    assert.equal(sig.length, 44, "SHA-256 HMAC base64 should be 44 chars");
   });
 
   it("different requests yield different signatures", () => {
@@ -130,7 +135,8 @@ describe("buildL2Headers", () => {
     assert.equal(h.POLY_PASSPHRASE, creds.passphrase);
     assert.ok(h.POLY_TIMESTAMP);
     assert.ok(h.POLY_SIGNATURE);
-    assert.match(h.POLY_SIGNATURE, /^[A-Za-z0-9_-]+$/);
+    // URL-safe base64 with padding (V2 parity — see computeHmac comment).
+    assert.match(h.POLY_SIGNATURE, /^[A-Za-z0-9_-]+=*$/);
     // Ensure exactly these 5 keys — no stray headers
     assert.deepEqual(Object.keys(h).sort(),
       ["POLY_ADDRESS", "POLY_API_KEY", "POLY_PASSPHRASE", "POLY_SIGNATURE", "POLY_TIMESTAMP"]);

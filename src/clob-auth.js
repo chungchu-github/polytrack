@@ -164,21 +164,31 @@ export async function createOrDeriveApiKey({ privateKey, clobUrl }) {
  * Compute the base64url-encoded HMAC-SHA256 signature that Polymarket
  * requires in the POLY_SIGNATURE header for every trading request.
  *
- *   sig = base64url(HMAC-SHA256(base64url_decode(secret), timestamp + method + path + body))
+ *   sig = urlsafe_b64encode(HMAC-SHA256(urlsafe_b64decode(secret), timestamp + method + path + body))
  *
- * Matches py-clob-client's signing/hmac.py behaviour exactly:
+ * Matches py-clob-client-v2's signing/hmac.py exactly:
  *   - `secret` is URL-safe base64 → decode with `base64url` (Node ≥16).
  *   - `path` is the request path INCLUDING query string, excluding origin.
- *   - `body` is the raw JSON string for POST/DELETE; "" for GET.
- *   - Encoding is base64url WITHOUT padding (RFC 4648 §5).
+ *   - `body` is the raw JSON string for POST/DELETE; "" for GET — and only
+ *     gets appended when truthy (matching the `if body:` check in py).
+ *   - Encoding is URL-safe base64 **WITH** `=` padding. Earlier comment
+ *     here said "WITHOUT padding (RFC 4648 §5)" — that turns out to be
+ *     wrong against the V2 server, which validates against Python's
+ *     `urlsafe_b64encode` output (44 chars, padded). Stripping the `=`
+ *     produced 401 "Unauthorized/Invalid api key" on every L2 call
+ *     (verified 2026-05-10).
  *   - No separator characters between timestamp/method/path/body.
  */
 export function computeHmac({ secret, timestamp, method, path, body = "" }) {
   const keyBytes = Buffer.from(secret, "base64url");
-  const msg = `${timestamp}${String(method).toUpperCase()}${path}${body || ""}`;
+  // Match py-clob-client-v2: only append body when truthy. For GET requests
+  // body is "" → falsy → not appended. Using `${body || ""}` would have been
+  // a no-op for "" anyway, but the explicit guard makes the parity obvious.
+  let msg = `${timestamp}${String(method).toUpperCase()}${path}`;
+  if (body) msg += String(body).replace(/'/g, '"');
   const sig = crypto.createHmac("sha256", keyBytes).update(msg).digest();
-  // Node's "base64url" encoding strips padding and uses -/_ by default.
-  return sig.toString("base64url");
+  // Standard base64 keeps padding; convert +/ → -/_ for URL-safe.
+  return sig.toString("base64").replace(/\+/g, "-").replace(/\//g, "_");
 }
 
 /**
