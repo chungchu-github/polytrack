@@ -87,6 +87,112 @@ export const ORDER_TYPES = {
   ],
 };
 
+// ── Solady ERC-1271 / POLY_1271 (sigtype=3) Packed Signature ─────────────────
+// Polymarket V2 deposit wallets (Solady ERC-1967 proxies, impl
+// 0x58CA52ebe0DadfdF531Cde7062e76746de4Db1eB) verify CLOB orders via ERC-1271
+// with a nested EIP-712 wrapper. The CLOB server unpacks this wrapper and
+// recomputes the digest server-side — a plain EOA signature over the Order
+// hash passes proxy.isValidSignature (Solady has a fallback that just checks
+// owner==ecrecover), but CLOB enforces the wrapped form strictly and returns
+// "invalid signature" otherwise.
+//
+// Wrapping format (matches py-clob-client-v2 v1.0.1
+// order_utils/exchange_order_builder_v2.py::_build_poly_1271_order_signature):
+//   inner_sig(65) || app_domain_separator(32) || contents_hash(32) ||
+//   contents_type_utf8(N) || uint16_BE(len(contents_type))
+//
+// inner_sig is a raw ECDSA signature (NO EIP-191 prefix) over the digest
+//   keccak256(0x1901 || app_domain_separator || typed_data_sign_struct_hash)
+// where typed_data_sign_struct_hash is the Solady TypedDataSign struct over
+// the contents_hash, with the DepositWallet domain fields inlined.
+
+const ORDER_TYPE_STRING =
+  "Order(uint256 salt,address maker,address signer,uint256 tokenId," +
+  "uint256 makerAmount,uint256 takerAmount,uint8 side,uint8 signatureType," +
+  "uint256 timestamp,bytes32 metadata,bytes32 builder)";
+
+const SOLADY_TYPE_STRING =
+  "TypedDataSign(Order contents,string name,string version,uint256 chainId," +
+  "address verifyingContract,bytes32 salt)" + ORDER_TYPE_STRING;
+
+const DOMAIN_TYPE_STRING =
+  "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)";
+
+const ORDER_TYPE_HASH             = ethers.keccak256(ethers.toUtf8Bytes(ORDER_TYPE_STRING));
+const SOLADY_TYPE_HASH            = ethers.keccak256(ethers.toUtf8Bytes(SOLADY_TYPE_STRING));
+const DOMAIN_TYPE_HASH            = ethers.keccak256(ethers.toUtf8Bytes(DOMAIN_TYPE_STRING));
+const DEPOSIT_WALLET_NAME_HASH    = ethers.keccak256(ethers.toUtf8Bytes("DepositWallet"));
+const DEPOSIT_WALLET_VERSION_HASH = ethers.keccak256(ethers.toUtf8Bytes("1"));
+const DEPOSIT_WALLET_DOMAIN_SALT  = "0x" + "00".repeat(32);
+
+const CTF_EXCHANGE_NAME_HASH    = ethers.keccak256(ethers.toUtf8Bytes("Polymarket CTF Exchange"));
+const CTF_EXCHANGE_VERSION_HASH = ethers.keccak256(ethers.toUtf8Bytes("2"));
+
+function computeAppDomainSeparator({ chainId, verifyingContract }) {
+  return ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ["bytes32", "bytes32", "bytes32", "uint256", "address"],
+      [DOMAIN_TYPE_HASH, CTF_EXCHANGE_NAME_HASH, CTF_EXCHANGE_VERSION_HASH, chainId, verifyingContract],
+    ),
+  );
+}
+
+function computeContentsHash(m) {
+  return ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      [
+        "bytes32",
+        "uint256", "address", "address",
+        "uint256", "uint256", "uint256",
+        "uint8",   "uint8",   "uint256",
+        "bytes32", "bytes32",
+      ],
+      [
+        ORDER_TYPE_HASH,
+        m.salt, m.maker, m.signer,
+        m.tokenId, m.makerAmount, m.takerAmount,
+        m.side, m.signatureType, m.timestamp,
+        m.metadata, m.builder,
+      ],
+    ),
+  );
+}
+
+export function buildPoly1271Signature({ orderData, domain, privateKey }) {
+  const appDomainSep = computeAppDomainSeparator(domain);
+  const contentsHash = computeContentsHash(orderData);
+
+  const typedDataSignStructHash = ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ["bytes32", "bytes32", "bytes32", "bytes32", "uint256", "address", "bytes32"],
+      [
+        SOLADY_TYPE_HASH,
+        contentsHash,
+        DEPOSIT_WALLET_NAME_HASH,
+        DEPOSIT_WALLET_VERSION_HASH,
+        domain.chainId,
+        orderData.signer,                       // = deposit wallet address (funder)
+        DEPOSIT_WALLET_DOMAIN_SALT,
+      ],
+    ),
+  );
+
+  const digest = ethers.keccak256(
+    ethers.concat(["0x1901", appDomainSep, typedDataSignStructHash]),
+  );
+
+  // Raw secp256k1 sign of the 32-byte digest — NO EIP-191 prefix.
+  // Mirrors py-clob-client-v2's Account._sign_hash().
+  const signingKey = new ethers.SigningKey(privateKey);
+  const innerSig = signingKey.sign(digest).serialized;   // "0x" + 130 hex chars = 65 bytes
+
+  const contentsTypeBytes = ethers.toUtf8Bytes(ORDER_TYPE_STRING);
+  // Length prefix: uint16 big-endian = length of ORDER_TYPE_STRING in bytes.
+  const lenBE = ethers.toBeHex(contentsTypeBytes.length, 2);
+
+  return ethers.concat([innerSig, appDomainSep, contentsHash, contentsTypeBytes, lenBE]);
+}
+
 /**
  * Convert a builder code (string or hex) to a bytes32 value. Defaults to
  * ZERO_BYTES32 when no builder attribution is configured.
@@ -241,6 +347,13 @@ export function buildUnsignedOrder({
  * `window.ethereum.signTypedData_v4` via wagmi/viem.
  */
 export async function signOrder({ privateKey, orderData, domain }) {
+  // POLY_1271 deposit-wallet flow uses Solady's nested ERC-1271 wrapper.
+  // A plain EIP-712 signature is rejected by CLOB with "invalid signature"
+  // even though proxy.isValidSignature returns the magic value (Solady has
+  // a permissive fallback path). See buildPoly1271Signature() above.
+  if (orderData.signatureType === SIGNATURE_TYPE_POLY_1271) {
+    return buildPoly1271Signature({ orderData, domain, privateKey });
+  }
   const wallet = new ethers.Wallet(privateKey);
   return wallet.signTypedData(domain, ORDER_TYPES, orderData);
 }

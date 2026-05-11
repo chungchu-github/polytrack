@@ -21,6 +21,8 @@ import {
   getExchangeDomain, ORDER_TYPES,
   EXCHANGE_V2_ADDRESS, NEG_RISK_EXCHANGE_ADDRESS,
   classifyClobOrderStatus, evaluateExit,
+  buildPoly1271Signature,
+  SIGNATURE_TYPE_POLY_1271,
 } from "../src/trading.js";
 
 const TEST_WALLET = ethers.Wallet.createRandom();
@@ -604,5 +606,163 @@ describe("evaluateExit", () => {
       policy:         { ...POLICY, stopLossPct: 0 },
     });
     assert.equal(r.shouldExit, false);
+  });
+});
+
+// ── POLY_1271 (sigtype=3) Solady packed signature ───────────────────────────
+//
+// Mirrors py-clob-client-v2 v1.0.1
+// order_utils/exchange_order_builder_v2.py::_build_poly_1271_order_signature.
+// We can't easily check byte-for-byte equality against the Python output (the
+// digest depends on a random salt), so the test instead pins the structural
+// invariants that CLOB validates server-side:
+//   1. Packed sig length = 65 + 32 + 32 + len(ORDER_TYPE_STRING) + 2.
+//   2. Last 2 bytes = uint16-BE length of ORDER_TYPE_STRING.
+//   3. The N bytes before the length match the ORDER_TYPE_STRING UTF-8 bytes.
+//   4. The contents_hash + app_domain_separator at the appropriate offsets
+//      match what we recompute from the same orderData/domain.
+//   5. Recovering the inner signature against the wallet-domain digest yields
+//      the EOA address derived from the signing key — proves the wrapper is
+//      signed by the correct private key (not the funder address).
+describe("trading — POLY_1271 Solady packed signature", () => {
+  // Hand-construct an orderData rather than going through buildUnsignedOrder
+  // so the test is deterministic (no Math.random in salt / Date.now in ts).
+  const FUNDER = "0xafd96337fc55cc90320b6281c0c4016c24b81a4e";
+  const ORDER_TYPE_STRING_LEN = 186; // sanity-check against accidental string edits
+  const orderData = {
+    salt: 1234567890,
+    maker: FUNDER,
+    signer: FUNDER,                          // POLY_1271: signer = funder
+    tokenId: BigInt("742126720381116423384184412325128784633166194374209530196688686498463"),
+    makerAmount: BigInt(5_000_000),          // $5 pUSD
+    takerAmount: BigInt(38_000_000),
+    side: 0,
+    signatureType: 3,
+    timestamp: BigInt(1778482365624),
+    metadata: "0x" + "00".repeat(32),
+    builder:  "0x" + "00".repeat(32),
+  };
+  const domain = {
+    name: "Polymarket CTF Exchange",
+    version: "2",
+    chainId: 137,
+    verifyingContract: EXCHANGE_V2_ADDRESS,
+  };
+
+  it("produces correctly-shaped packed signature", () => {
+    const sig = buildPoly1271Signature({
+      orderData, domain, privateKey: TEST_WALLET.privateKey,
+    });
+    const bytes = ethers.getBytes(sig);
+
+    // 65 (inner) + 32 (appDomainSep) + 32 (contentsHash) + N (typeStr) + 2 (len)
+    assert.equal(bytes.length, 65 + 32 + 32 + ORDER_TYPE_STRING_LEN + 2,
+      `expected ${65 + 32 + 32 + ORDER_TYPE_STRING_LEN + 2} bytes, got ${bytes.length}`);
+
+    // Trailing uint16-BE length matches len(ORDER_TYPE_STRING)
+    const len = (bytes[bytes.length - 2] << 8) | bytes[bytes.length - 1];
+    assert.equal(len, ORDER_TYPE_STRING_LEN);
+
+    // contentsType prefix matches ORDER_TYPE_STRING utf8
+    const contentsTypeBytes = bytes.slice(65 + 32 + 32, 65 + 32 + 32 + len);
+    const decoded = new TextDecoder("utf-8").decode(contentsTypeBytes);
+    assert.match(decoded, /^Order\(uint256 salt,address maker,address signer,/);
+    assert.equal(decoded.length, ORDER_TYPE_STRING_LEN);
+  });
+
+  it("inner signature recovers to the EOA private key", () => {
+    const sig = buildPoly1271Signature({
+      orderData, domain, privateKey: TEST_WALLET.privateKey,
+    });
+    const innerSig = ethers.hexlify(ethers.getBytes(sig).slice(0, 65));
+
+    // Re-derive the digest the same way the production code does.
+    const appDomainTypeHash = ethers.keccak256(ethers.toUtf8Bytes(
+      "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
+    ));
+    const appDomainSep = ethers.keccak256(
+      ethers.AbiCoder.defaultAbiCoder().encode(
+        ["bytes32", "bytes32", "bytes32", "uint256", "address"],
+        [
+          appDomainTypeHash,
+          ethers.keccak256(ethers.toUtf8Bytes("Polymarket CTF Exchange")),
+          ethers.keccak256(ethers.toUtf8Bytes("2")),
+          domain.chainId,
+          domain.verifyingContract,
+        ],
+      ),
+    );
+    const orderTypeStr = "Order(uint256 salt,address maker,address signer,uint256 tokenId," +
+      "uint256 makerAmount,uint256 takerAmount,uint8 side,uint8 signatureType," +
+      "uint256 timestamp,bytes32 metadata,bytes32 builder)";
+    const orderTypeHash = ethers.keccak256(ethers.toUtf8Bytes(orderTypeStr));
+    const contentsHash = ethers.keccak256(
+      ethers.AbiCoder.defaultAbiCoder().encode(
+        [
+          "bytes32",
+          "uint256", "address", "address",
+          "uint256", "uint256", "uint256",
+          "uint8", "uint8", "uint256",
+          "bytes32", "bytes32",
+        ],
+        [
+          orderTypeHash,
+          orderData.salt, orderData.maker, orderData.signer,
+          orderData.tokenId, orderData.makerAmount, orderData.takerAmount,
+          orderData.side, orderData.signatureType, orderData.timestamp,
+          orderData.metadata, orderData.builder,
+        ],
+      ),
+    );
+    const soladyTypeStr =
+      "TypedDataSign(Order contents,string name,string version,uint256 chainId," +
+      "address verifyingContract,bytes32 salt)" + orderTypeStr;
+    const soladyTypeHash = ethers.keccak256(ethers.toUtf8Bytes(soladyTypeStr));
+    const tdsStructHash = ethers.keccak256(
+      ethers.AbiCoder.defaultAbiCoder().encode(
+        ["bytes32", "bytes32", "bytes32", "bytes32", "uint256", "address", "bytes32"],
+        [
+          soladyTypeHash,
+          contentsHash,
+          ethers.keccak256(ethers.toUtf8Bytes("DepositWallet")),
+          ethers.keccak256(ethers.toUtf8Bytes("1")),
+          domain.chainId,
+          orderData.signer,
+          "0x" + "00".repeat(32),
+        ],
+      ),
+    );
+    const digest = ethers.keccak256(ethers.concat(["0x1901", appDomainSep, tdsStructHash]));
+
+    // Recover the EOA from the inner signature over the digest.
+    const recovered = ethers.recoverAddress(digest, innerSig);
+    assert.equal(recovered.toLowerCase(), TEST_WALLET.address.toLowerCase());
+
+    // Sanity: contentsHash + appDomainSep are at expected offsets in the packed sig.
+    const bytes = ethers.getBytes(sig);
+    const packedAppSep = ethers.hexlify(bytes.slice(65, 65 + 32));
+    const packedContents = ethers.hexlify(bytes.slice(65 + 32, 65 + 64));
+    assert.equal(packedAppSep.toLowerCase(), appDomainSep.toLowerCase());
+    assert.equal(packedContents.toLowerCase(), contentsHash.toLowerCase());
+  });
+
+  it("signOrder dispatches POLY_1271 path when signatureType=3", async () => {
+    const sig = await signOrder({
+      privateKey: TEST_WALLET.privateKey,
+      orderData,
+      domain,
+    });
+    // Packed signature is much longer than a standard 65-byte EOA sig (~387B).
+    assert.ok(ethers.getBytes(sig).length > 200,
+      "POLY_1271 signature should be packed (>200 bytes), got " + ethers.getBytes(sig).length);
+  });
+
+  it("signOrder still produces 65-byte sig for non-POLY_1271 paths", async () => {
+    const sig = await signOrder({
+      privateKey: TEST_WALLET.privateKey,
+      orderData: { ...orderData, signatureType: 0, signer: TEST_WALLET.address },
+      domain,
+    });
+    assert.equal(ethers.getBytes(sig).length, 65);
   });
 });
