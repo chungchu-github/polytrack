@@ -672,18 +672,42 @@ export async function executeCopyTrade(signal, config) {
 
   const orderId = data?.orderID || data?.id;
 
-  // 6. Verify fill (poll for up to 60s with exponential backoff)
+  // 6. Extract fill info. POST /order's response already carries the final
+  // fill state for FOK orders that immediately match — we don't need to poll
+  // /order/:id for those, which would 404 (Polymarket purges filled orders
+  // from that endpoint). verifyFill is kept as a fallback for orders that
+  // come back with a non-terminal status (e.g. GTC orders, or FOK that hit
+  // the queue before matching).
   let finalStatus = ok ? "SUBMITTED" : "FAILED";
-  let filledSize = null;
+  let filledSize  = null;
   let filledPrice = null;
+  let txHash;
   let slippageWarning;
-  if (ok && orderId) {
-    const fillResult = await verifyFill(orderId, {});
-    if (fillResult.status !== "UNKNOWN") finalStatus = fillResult.status;
-    filledSize  = fillResult.filledSize;
-    filledPrice = fillResult.filledPrice;
+  if (ok && data) {
+    const inline = classifyClobOrderStatus(data.status);
+    // POST /order returns: { status, makingAmount, takingAmount, transactionsHashes, ... }
+    // - For BUY: makingAmount = pUSD spent (6dp), takingAmount = outcome tokens received (6dp)
+    // - For SELL: swap meaning
+    if (inline === "FILLED" || inline === "PARTIAL") {
+      finalStatus = inline;
+      const taking = Number(data.takingAmount);
+      const making = Number(data.makingAmount);
+      if (Number.isFinite(taking) && taking > 0) filledSize = taking;
+      // Derived fill price: BUY → making/taking (pUSD per token).
+      if (Number.isFinite(taking) && taking > 0 && Number.isFinite(making) && making > 0) {
+        filledPrice = making / taking;
+      }
+      const hashes = Array.isArray(data.transactionsHashes) ? data.transactionsHashes : [];
+      if (hashes.length > 0) txHash = hashes[0];
+    } else if (orderId) {
+      // Non-terminal — fall back to polling (rare on FOK).
+      const fillResult = await verifyFill(orderId, {});
+      if (fillResult.status !== "UNKNOWN") finalStatus = fillResult.status;
+      filledSize  = fillResult.filledSize;
+      filledPrice = fillResult.filledPrice;
+    }
 
-    // Slippage validation: filled price should be <= limit price for BUY
+    // Slippage validation: filled price should be <= limit price for BUY.
     if (filledPrice != null && filledPrice > limitPrice) {
       slippageWarning = `Filled at ${filledPrice} > limit ${limitPrice}`;
     }
@@ -703,7 +727,7 @@ export async function executeCopyTrade(signal, config) {
     filledPrice,
     orderId,
     status: finalStatus,
-    txHash: data?.transactionHash,
+    txHash: txHash || data?.transactionHash,
     error: !ok ? JSON.stringify(data).slice(0, 200) : slippageWarning,
     executedAt: Date.now(),
     negRisk,        // persisted so runExits routes the SELL to the same exchange
