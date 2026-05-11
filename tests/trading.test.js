@@ -757,6 +757,16 @@ describe("trading — POLY_1271 Solady packed signature", () => {
       "POLY_1271 signature should be packed (>200 bytes), got " + ethers.getBytes(sig).length);
   });
 
+  it("accepts un-prefixed private key (MetaMask export format)", () => {
+    const pkNoPrefix = TEST_WALLET.privateKey.slice(2);
+    // Should NOT throw — production reads PRIVATE_KEY from env and MetaMask
+    // exports the key without the "0x" prefix.
+    const sig = buildPoly1271Signature({
+      orderData, domain, privateKey: pkNoPrefix,
+    });
+    assert.equal(ethers.getBytes(sig).length, 65 + 32 + 32 + 186 + 2);
+  });
+
   it("signOrder still produces 65-byte sig for non-POLY_1271 paths", async () => {
     const sig = await signOrder({
       privateKey: TEST_WALLET.privateKey,

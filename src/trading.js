@@ -183,7 +183,10 @@ export function buildPoly1271Signature({ orderData, domain, privateKey }) {
 
   // Raw secp256k1 sign of the 32-byte digest — NO EIP-191 prefix.
   // Mirrors py-clob-client-v2's Account._sign_hash().
-  const signingKey = new ethers.SigningKey(privateKey);
+  // ethers.SigningKey strictly requires "0x" prefix (ethers.Wallet accepts
+  // both), but MetaMask exports private keys without it — normalise here.
+  const pkHex = privateKey.startsWith("0x") ? privateKey : "0x" + privateKey;
+  const signingKey = new ethers.SigningKey(pkHex);
   const innerSig = signingKey.sign(digest).serialized;   // "0x" + 130 hex chars = 65 bytes
 
   const contentsTypeBytes = ethers.toUtf8Bytes(ORDER_TYPE_STRING);
