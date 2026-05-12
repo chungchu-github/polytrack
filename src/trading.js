@@ -287,9 +287,17 @@ export function buildUnsignedOrder({
   if (side === 0) {
     // BUY — maker provides USDC, taker provides tokens
     if (!(maxUsdc > 0)) throw new Error("buildUnsignedOrder: maxUsdc required for BUY");
-    const tokens = Math.floor(maxUsdc / price);
-    makerAmount = BigInt(Math.round(maxUsdc * 1e6));    // pUSD 6 decimals
-    takerAmount = BigInt(Math.round(tokens * 1e6));     // outcome tokens 6 decimals
+    // Effective price on chain = makerAmount / takerAmount. Polymarket
+    // strictly rejects orders where that ratio is >= 1 OR <= 0.
+    //
+    // Earlier impl took floor(maxUsdc/price) tokens (whole-token rounding),
+    // which on small budgets + high prices collapsed to a 1:1 ratio:
+    //   $5 / 0.84 = 5.97 → floor 5 tokens → makerAmount = takerAmount = 5e6
+    //   → implied price = 1.0 → "invalid price, must be > 0 and < 1".
+    // Stay in micro-units (1e6) end-to-end and ceil takerAmount so the
+    // ratio is always strictly < limit price.
+    makerAmount = BigInt(Math.round(maxUsdc * 1e6));         // pUSD 6dp
+    takerAmount = BigInt(Math.ceil(maxUsdc * 1e6 / price));  // tokens 6dp
   } else {
     // SELL — maker provides tokens, taker provides USDC
     if (!(tokenQty > 0)) throw new Error("buildUnsignedOrder: tokenQty required for SELL");

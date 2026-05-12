@@ -264,6 +264,24 @@ describe("F1 — buildUnsignedOrder", () => {
     assert.throws(() => buildUnsignedOrder(validUnsignedArgs({ price: 0 })),          /price/);
     assert.throws(() => buildUnsignedOrder(validUnsignedArgs({ maxUsdc: 0 })),        /maxUsdc/);
   });
+
+  // Regression: 2026-05-11 production hit
+  //   {"error":"invalid price, price must be greater than 0 and less than 1"}
+  // for $5 BUY at limit 0.837. Old impl computed tokens = floor(5/0.837) = 5
+  // then takerAmount = 5e6, collapsing implied price to maker/taker = 1.0.
+  // Stay in 1e6 micro-units + ceil to keep ratio strictly < limit.
+  it("keeps implied price < 1 on small-budget high-price BUY", () => {
+    for (const price of [0.50, 0.70, 0.837, 0.92, 0.99]) {
+      const { orderData } = buildUnsignedOrder(validUnsignedArgs({
+        price, maxUsdc: 5, side: 0,
+      }));
+      const ratio = Number(orderData.makerAmount) / Number(orderData.takerAmount);
+      assert.ok(ratio < 1.0,
+        `price=${price}: implied ratio ${ratio} must be < 1 (was ${orderData.makerAmount}/${orderData.takerAmount})`);
+      assert.ok(ratio <= price + 1e-9,
+        `price=${price}: implied ratio ${ratio} must be <= limit ${price}`);
+    }
+  });
 });
 
 describe("F1 — signOrder + wrapOrderPayload round-trip", () => {
