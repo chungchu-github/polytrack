@@ -46,6 +46,11 @@ const DEFAULTS = {
       maxTradeUsdc: 5,         // 1/4 of consensus, even after dryRun is lifted
       minStrength: 60,
       marketCooldownMin: 60,   // tighter than consensus (30)
+      // 2026-05-12 sample-quality patch — see src/strategies/antidegen.js
+      // DEFAULTS for the rationale. Keys must exist here too for
+      // mergeStrategies() to preserve operator overrides from data/config.json.
+      minWallets: 2,
+      maxSignalsPerResolveDay: 1,
     },
   },
   // P0 #4 — auto-exit / stop-loss for filled positions.
