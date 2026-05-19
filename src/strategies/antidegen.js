@@ -31,13 +31,25 @@ const DEFAULTS = {
   dryRun: true,                   // first-week observation lock
   recencyDays: 3,                 // DEGEN signals decay faster than ELITE
   minPositionSize: 50,            // filter dust-level fades
-  minWallets: 1,                  // 1 DEGEN entering
+  // 2026-05-12: raised from 1 → 2 after first $30 of live trades closed
+  // -$19 (5L/1W) on same-day European football. Hypothesis: single-DEGEN
+  // signals on sports markets are weakly informative; requiring 2+ degens
+  // on the same (cid, dir) raises the bar for "this is a fade-worthy
+  // structural error" vs "one casual gambler picked NO on a weak team."
+  minWallets: 2,
   requireNoEliteAligned: true,    // ELITE on same side → skip
   sizeCapPerWallet: 5000,
   staleAfterScans: 3,
   expireAfterScans: 6,
   maxFadeDrift: 0.10,             // currentPrice > degenEntry + 10¢ on
                                   // ORIGINAL direction → market corrected, skip
+  // 2026-05-12: cluster filter. The first live loss-streak was 6 signals
+  // firing in a 1.5h window, all on European football matches resolving
+  // the same evening — outcomes were highly correlated and one bad night
+  // of results wiped 5/6 fades. Cap active signals per market-resolve
+  // day (UTC) so a single sports card can't blanket the strategy.
+  // 0 disables the filter (back to old behaviour).
+  maxSignalsPerResolveDay: 1,
 };
 
 export class AntiDegenStrategy extends BaseStrategy {
@@ -216,6 +228,36 @@ export class AntiDegenStrategy extends BaseStrategy {
     for (const [key, sig] of this.signals) {
       if (sig.status === "EXPIRED" && this.scanCount - sig.lastConfirmedScan > cfg.expireAfterScans * 2) {
         this.signals.delete(key);
+      }
+    }
+
+    // Cluster filter — keep at most `maxSignalsPerResolveDay` ACTIVE signals
+    // per market resolution day (UTC). Stronger signals win. Demoted ones
+    // are tagged EXPIRED so getActiveSignals() drops them, but stay in the
+    // map so the next scan can re-emerge them with a fresh strength.
+    this.lastClusterFiltered = [];
+    if (cfg.maxSignalsPerResolveDay > 0) {
+      const active = [...this.signals.values()]
+        .filter(s => s.status !== "EXPIRED")
+        .sort((a, b) => b.strength - a.strength);
+      const dayCount = new Map();
+      for (const sig of active) {
+        const end = sig.market?.endDate ?? sig.market?.end_date_iso;
+        if (!end) continue;
+        const dayKey = String(end).slice(0, 10);   // "YYYY-MM-DD"
+        const n = dayCount.get(dayKey) || 0;
+        if (n >= cfg.maxSignalsPerResolveDay) {
+          sig.status = "EXPIRED";
+          sig.clusterFiltered = true;
+          this.lastClusterFiltered.push({
+            conditionId: sig.conditionId,
+            direction:   sig.direction,
+            strength:    sig.strength,
+            resolveDay:  dayKey,
+          });
+        } else {
+          dayCount.set(dayKey, n + 1);
+        }
       }
     }
 
