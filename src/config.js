@@ -22,6 +22,11 @@ const DEFAULTS = {
   maxTotalExposureUsdc: 1000,
   marketCooldownMin: 30,
   webhookUrl: "",             // Discord/Slack webhook
+  // Hard-block by market title substring (case-insensitive). Applied in
+  // server.js right after detectAll so blocked titles never reach dryRun
+  // recording or live execution. Use for topics the operator can't / won't
+  // touch (e.g. specific elections, jurisdictionally restricted markets).
+  blockedTitleKeywords: [],
   // V3: 0=disabled; >0 caps lifetime auto-trade USDC AND bypasses V1 Gate.
   // Set >0 only when ready to send real CLOB orders. Smoke-test attempt
   // 2026-05-10 paused after discovering the funder is an EIP-1167 Magic-link
@@ -179,6 +184,13 @@ export function saveConfig(patch) {
       next[k] = n;
     } else if (typeof DEFAULTS[k] === "string") {
       next[k] = String(v || "");
+    } else if (Array.isArray(DEFAULTS[k]) && Array.isArray(v)) {
+      // Accept string arrays only (blockedTitleKeywords). Drop null/undefined
+      // first (String(null) === "null" otherwise), then trim + drop blanks.
+      next[k] = v
+        .filter(item => item != null)
+        .map(item => String(item).trim())
+        .filter(Boolean);
     }
   }
   mkdirSync(dirname(CONFIG_PATH), { recursive: true });

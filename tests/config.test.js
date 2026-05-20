@@ -54,6 +54,22 @@ describe("config — load/save", () => {
     assert.equal(after2.maxTradeUsdc, before.maxTradeUsdc);
   });
 
+  it("persists blockedTitleKeywords as a string array", async () => {
+    const { saveConfig, loadConfig } = await freshConfig();
+    saveConfig({ blockedTitleKeywords: [" KMT ", "Kuomintang", "DPP", "", null] });
+    const cfg = loadConfig();
+    // Whitespace-trimmed, blanks dropped, order preserved.
+    assert.deepEqual(cfg.blockedTitleKeywords, ["KMT", "Kuomintang", "DPP"]);
+  });
+
+  it("ignores non-array values for blockedTitleKeywords", async () => {
+    const { saveConfig, loadConfig } = await freshConfig();
+    saveConfig({ blockedTitleKeywords: ["KMT"] });
+    saveConfig({ blockedTitleKeywords: "not-an-array" });
+    const cfg = loadConfig();
+    assert.deepEqual(cfg.blockedTitleKeywords, ["KMT"]);
+  });
+
   it("merges existing file with defaults on load", async () => {
     writeFileSync(CONFIG_PATH, JSON.stringify({ slippagePct: 5 }));
     const { loadConfig } = await freshConfig();

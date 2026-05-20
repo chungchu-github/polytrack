@@ -570,7 +570,40 @@ async function runScan() {
       now: Date.now(),
       log,
     };
-    const signals = state.strategyEngine.detectAll(detectCtx);
+    let signals = state.strategyEngine.detectAll(detectCtx);
+
+    // Global keyword blocklist — skip ANY signal whose market title contains
+    // one of the configured terms (case-insensitive, substring match). Applied
+    // BEFORE the dryRun / live gates so blocked markets neither pollute
+    // dry_run_signals nor reach the trade path. Configure via
+    // data/config.json:  "blockedTitleKeywords": ["KMT", "DPP", ...]
+    //
+    // Use case: operator is jurisdictionally / personally barred from a topic
+    // (e.g. Taiwan elections) and wants a hard cut-off independent of strategy.
+    {
+      const cfg = loadConfig();
+      const blocked = (cfg.blockedTitleKeywords || [])
+        .map(k => String(k).trim())
+        .filter(Boolean);
+      if (blocked.length > 0) {
+        const lower = blocked.map(k => k.toLowerCase());
+        const skipped = [];
+        signals = signals.filter(sig => {
+          const t = (sig.title || "").toLowerCase();
+          const hit = lower.find(k => t.includes(k));
+          if (hit) {
+            skipped.push({ title: sig.title, direction: sig.direction, kw: hit });
+            return false;
+          }
+          return true;
+        });
+        state.lastBlockedByKeyword = skipped;
+        if (skipped.length > 0) {
+          log.warn(`Keyword block: dropped ${skipped.length} signal(s) — ${skipped.map(s => `[${s.kw}] ${s.title?.slice(0,40)}`).join("; ")}`);
+        }
+      }
+    }
+
     state.signals = signals;
     // Surface entry-edge rejections so operator knows when consensus is
     // seeing pumped markets but correctly declining to chase.
