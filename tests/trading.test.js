@@ -282,6 +282,51 @@ describe("F1 — buildUnsignedOrder", () => {
         `price=${price}: implied ratio ${ratio} must be <= limit ${price}`);
     }
   });
+
+  // Regression: 2026-05-19 production hit on every World Cup fade with:
+  //   "invalid amounts, the market buy orders maker amount supports a max
+  //    accuracy of 2 decimals"
+  // NegRisk exchange requires both maker and taker amounts to be multiples
+  // of 10_000 micro-units (= 2 decimal places in token / USDC terms).
+  it("rounds maker AND taker to 2-decimal precision (10_000 micro-unit step)", () => {
+    // Sweep a mix of prices, focusing on those that produce non-clean
+    // takerAmount in the previous (ceil-only) implementation.
+    for (const price of [0.05, 0.123, 0.379, 0.50, 0.837, 0.92, 0.987]) {
+      const { orderData } = buildUnsignedOrder(validUnsignedArgs({
+        price, maxUsdc: 5, side: 0,
+      }));
+      assert.equal(orderData.makerAmount % 10000n, 0n,
+        `price=${price}: makerAmount ${orderData.makerAmount} not multiple of 10_000`);
+      assert.equal(orderData.takerAmount % 10000n, 0n,
+        `price=${price}: takerAmount ${orderData.takerAmount} not multiple of 10_000`);
+      // Quantisation must NOT push the ratio above the limit price (we
+      // floor maker / ceil taker on BUY for this reason).
+      const ratio = Number(orderData.makerAmount) / Number(orderData.takerAmount);
+      assert.ok(ratio <= price + 1e-9,
+        `price=${price}: post-quantise ratio ${ratio} > limit ${price}`);
+      assert.ok(ratio < 1.0,
+        `price=${price}: post-quantise ratio ${ratio} not strictly < 1`);
+    }
+  });
+
+  it("SELL side: 2-decimal quantisation keeps proceeds ≥ limit", () => {
+    for (const price of [0.123, 0.50, 0.92]) {
+      const { orderData } = buildUnsignedOrder({
+        signerAddress: TEST_WALLET.address,
+        funderAddress: TEST_FUNDER,
+        tokenId: TEST_TOKEN_ID,
+        side: 1,
+        price,
+        tokenQty: 10.5,
+      });
+      assert.equal(orderData.makerAmount % 10000n, 0n);
+      assert.equal(orderData.takerAmount % 10000n, 0n);
+      // For SELL: ratio = takerAmount/makerAmount = USDC per token ≥ limit
+      const proceedsPerToken = Number(orderData.takerAmount) / Number(orderData.makerAmount);
+      assert.ok(proceedsPerToken >= price - 1e-9,
+        `price=${price}: quantised proceeds ${proceedsPerToken} fell below limit`);
+    }
+  });
 });
 
 describe("F1 — signOrder + wrapOrderPayload round-trip", () => {

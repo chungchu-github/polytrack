@@ -284,6 +284,19 @@ export function buildUnsignedOrder({
   if (side !== 0 && side !== 1) throw new Error("buildUnsignedOrder: side must be 0 (BUY) or 1 (SELL)");
 
   let makerAmount, takerAmount;
+  // Polymarket V2 (esp. NEG_RISK exchange for FIFA-style multi-outcome
+  // baskets) enforces "max accuracy of 2 decimals" on both maker and
+  // taker amounts — micro-unit values must be multiples of 10_000.
+  // Tripped 2026-05-19 on every World Cup fade with:
+  //   "invalid amounts, the market buy orders maker amount supports a max
+  //    accuracy of 2 decimals"
+  // Round all amounts to the nearest 10_000 micro-unit; bias direction
+  // matters: floor maker / ceil taker on BUY (keep ratio ≤ limit), and
+  // the reverse on SELL (keep proceeds ≥ limit).
+  const STEP = 10_000n;
+  const roundDown = (v) => (v / STEP) * STEP;
+  const roundUp   = (v) => ((v + STEP - 1n) / STEP) * STEP;
+
   if (side === 0) {
     // BUY — maker provides USDC, taker provides tokens
     if (!(maxUsdc > 0)) throw new Error("buildUnsignedOrder: maxUsdc required for BUY");
@@ -295,14 +308,22 @@ export function buildUnsignedOrder({
     //   $5 / 0.84 = 5.97 → floor 5 tokens → makerAmount = takerAmount = 5e6
     //   → implied price = 1.0 → "invalid price, must be > 0 and < 1".
     // Stay in micro-units (1e6) end-to-end and ceil takerAmount so the
-    // ratio is always strictly < limit price.
-    makerAmount = BigInt(Math.round(maxUsdc * 1e6));         // pUSD 6dp
-    takerAmount = BigInt(Math.ceil(maxUsdc * 1e6 / price));  // tokens 6dp
+    // ratio is always strictly < limit price; then quantise both to 10_000
+    // micro-units to satisfy negRisk's 2-decimal precision check.
+    const rawMaker = BigInt(Math.round(maxUsdc * 1e6));
+    const rawTaker = BigInt(Math.ceil(maxUsdc * 1e6 / price));
+    makerAmount = roundDown(rawMaker);   // spend at most maxUsdc, snap down
+    takerAmount = roundUp(rawTaker);     // accept slightly more tokens → keeps ratio ≤ price
   } else {
     // SELL — maker provides tokens, taker provides USDC
     if (!(tokenQty > 0)) throw new Error("buildUnsignedOrder: tokenQty required for SELL");
-    makerAmount = BigInt(Math.round(tokenQty * 1e6));               // tokens we offer
-    takerAmount = BigInt(Math.round(tokenQty * price * 1e6));       // USDC we want
+    const rawMaker = BigInt(Math.round(tokenQty * 1e6));
+    const rawTaker = BigInt(Math.round(tokenQty * price * 1e6));
+    makerAmount = roundDown(rawMaker);   // offer at most tokenQty, snap down
+    takerAmount = roundUp(rawTaker);     // demand slightly more USDC → keeps price ≥ limit
+  }
+  if (makerAmount <= 0n || takerAmount <= 0n) {
+    throw new Error(`buildUnsignedOrder: amount below precision step (maker=${makerAmount}, taker=${takerAmount})`);
   }
 
   // Match py-clob-client-v2's generate_order_salt(): random * ms-epoch.
