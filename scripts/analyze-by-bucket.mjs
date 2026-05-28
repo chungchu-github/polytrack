@@ -92,11 +92,14 @@ function bucketFor(signal, market) {
 }
 
 // PnL semantics: signal.direction is the FADE direction (what we'd buy).
-// fade entry cost = signal.current_price (we buy the fade outcome at that
-// implied price). Current PnL per $1 invested:
-//   pnl_per_dollar = (current_price_of_fade / entry_price_of_fade) - 1
-// We use current_price as recorded at signal time as a proxy for entry —
-// matches the existing backtest semantics in scripts/backtest-antidegen.js.
+// `current_price` is recorded as the DEGEN's ORIGINAL-side price at signal
+// time, so on a binary market the fade outcome's entry is (1 - current_price).
+// Return per $1 invested in the fade:
+//   pnl_per_dollar = (fade_outcome_price_now / fade_entry) - 1
+// This matches scripts/backtest-antidegen.js (fadeEntry = 1 - current_price).
+// The previous `entry = current_price` used the wrong side: it understated the
+// cost basis and inflated PnL for sub-50¢ DEGEN entries (e.g. a 0.40 origDir
+// entry was treated as a 0.40 fade cost instead of the true 0.60).
 function computePnlPerDollar(signal, market) {
   const outcomes = JSON.parse(market.outcomes || "[]");
   const prices   = JSON.parse(market.outcomePrices || "[0,0]");
@@ -105,8 +108,8 @@ function computePnlPerDollar(signal, market) {
   const fadePxNow = Number(prices[fadeIdx]);
   if (!Number.isFinite(fadePxNow) || fadePxNow < 0) return null;
 
-  // Use recorded current_price as entry. Backtest convention.
-  const entry = signal.current_price;
+  // Fade entry = opposite outcome's price = 1 - (DEGEN's origDir price).
+  const entry = 1 - signal.current_price;
   if (!(entry > 0 && entry < 1)) return null;
   return { pnlPerDollar: (fadePxNow / entry) - 1, entry, fadePxNow, closed: market.closed };
 }
