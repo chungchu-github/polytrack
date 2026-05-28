@@ -311,3 +311,36 @@ describe("antidegen — lottery-ticket gate (maxFadeEntryPrice)", () => {
     assert.equal(sigs.length, 1);
   });
 });
+
+// ── cluster-filter re-emergence (regression) ────────────────────────────────
+// A signal demoted by the cluster filter is tagged EXPIRED + clusterFiltered
+// but kept in the map so it can "re-emerge" once the stronger same-day signal
+// clears (per the L262-264 comment). The re-confirm guard only revived
+// NEW/STALE signals, so a clusterFiltered=EXPIRED signal that kept firing was
+// re-added to confirmedKeys (refreshing lastConfirmedScan, blocking deletion)
+// yet never returned to an active state — a permanent zombie that could never
+// be promoted when its slot opened up.
+describe("antidegen — cluster-filtered signals re-emerge (regression)", () => {
+  it("weak fade re-emerges once the stronger same-day signal clears", () => {
+    // expireAfterScans:1 → the abandoned strong signal expires on the very
+    // next scan, deterministically opening the resolve-day slot for the weak one.
+    const s = new AntiDegenStrategy({ minWallets: 1, staleAfterScans: 1, expireAfterScans: 1 });
+    const endDate = "2026-05-11T22:00:00Z";
+    const strong = w("0xd1", "DEGEN", [pos("C1", "Yes", 500, 0.30)], { roi: -80 }); // strength ~58
+    const weak   = w("0xd2", "DEGEN", [pos("C2", "Yes", 500, 0.30)], { roi: -30 }); // strength ~25
+    const mStrong = event("C1", 0.32, "EPL match A", endDate);
+    const mWeak   = event("C2", 0.32, "EPL match B", endDate);
+
+    // Scan 1: both fire, same resolve-day, cap=1 → strong (C1) wins, weak demoted.
+    const scan1 = s.detect({ wallets: [strong, weak], markets: [mStrong, mWeak] });
+    assert.equal(scan1.length, 1, "only the strongest survives the cluster cap");
+    assert.equal(scan1[0].conditionId, "C1");
+
+    // Scan 2: the strong signal's DEGEN exits (C1 gone). The weak fade is now
+    // the only candidate for that resolve-day and must re-emerge as active.
+    const scan2 = s.detect({ wallets: [weak], markets: [mWeak] });
+    assert.equal(scan2.length, 1, "weak fade must re-emerge once the cluster clears");
+    assert.equal(scan2[0].conditionId, "C2");
+    assert.equal(scan2[0].clusterFiltered, false, "clusterFiltered flag cleared on revival");
+  });
+});

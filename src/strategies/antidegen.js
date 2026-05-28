@@ -219,8 +219,15 @@ export class AntiDegenStrategy extends BaseStrategy {
             sig.strength = strength;
             sig.wallets = aligned;
             Object.assign(sig, fadeFields);
-            if (sig.status === "NEW" || sig.status === "STALE") {
+            if (sig.status === "NEW" || sig.status === "STALE" ||
+                (sig.status === "EXPIRED" && sig.clusterFiltered)) {
               sig.status = "CONFIRMED";
+              // A cluster-filtered signal that's still firing must rejoin the
+              // active set so the cluster filter below can re-evaluate it: it
+              // either claims a now-open resolve-day slot or gets re-demoted
+              // (and re-tagged) this scan. Clearing the flag prevents a stuck
+              // EXPIRED zombie that can never be promoted.
+              sig.clusterFiltered = false;
             }
           } else {
             this.signals.set(key, {
@@ -305,12 +312,13 @@ export class AntiDegenStrategy extends BaseStrategy {
 }
 
 /**
- * Fade strength heuristic. With minWallets=1 the count factor is fixed,
- * so we lean on:
- *   - DEGEN's loss magnitude (deeper -ROI = stronger fade conviction)
- *   - position size (skin in the game)
- * Returns 0..100. Designed so a single -50% ROI degen with a $500 position
- * lands around 60–70 (above the default minStrength=60 gate in config).
+ * Fade strength heuristic (0..100). Weighted blend of:
+ *   - DEGEN loss magnitude (deeper -ROI = stronger fade conviction) — 65%
+ *   - position size (skin in the game) — 25%
+ *   - wallet-count bonus (more degens on the same side) — 10%
+ * With the default minWallets=2 the count bonus is always >= 50, so in
+ * practice the minStrength=60 gate is carried by the loss term: a fade
+ * clears it only when the degen cohort's average ROI is deeply negative.
  */
 function calcFadeStrength(aligned) {
   if (!aligned.length) return 0;
