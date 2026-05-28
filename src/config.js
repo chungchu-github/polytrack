@@ -56,6 +56,7 @@ const DEFAULTS = {
       // mergeStrategies() to preserve operator overrides from data/config.json.
       minWallets: 2,
       maxSignalsPerResolveDay: 1,
+      maxFadeEntryPrice: 0.85,
     },
   },
   // P0 #4 — auto-exit / stop-loss for filled positions.

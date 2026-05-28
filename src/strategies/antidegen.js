@@ -43,6 +43,13 @@ const DEFAULTS = {
   expireAfterScans: 6,
   maxFadeDrift: 0.10,             // currentPrice > degenEntry + 10¢ on
                                   // ORIGINAL direction → market corrected, skip
+  // 2026-05-21: skip "lottery-ticket fades". When a DEGEN buys a cheap
+  // long-shot (e.g. "Will Brazil win the 2026 World Cup?" YES @ 0.09 — a
+  // rational small punt, not a degenerate error), the fade is the near-
+  // certain NO @ 0.91: max upside ~10¢ vs full-$ downside, on a market the
+  // book already prices efficiently. Negative-to-zero edge. Skip any fade
+  // whose entry price exceeds this. 0 disables the gate.
+  maxFadeEntryPrice: 0.85,
   // 2026-05-12: cluster filter. The first live loss-streak was 6 signals
   // firing in a 1.5h window, all on European football matches resolving
   // the same evening — outcomes were highly correlated and one bad night
@@ -62,6 +69,8 @@ export class AntiDegenStrategy extends BaseStrategy {
     this.scanCount = 0;
     this.lastSkippedByEdge = [];
     this.lastSkippedByEliteAligned = [];
+    this.lastSkippedByFadePrice = [];
+    this.lastClusterFiltered = [];
   }
 
   detect({ wallets, markets } = {}) {
@@ -72,6 +81,7 @@ export class AntiDegenStrategy extends BaseStrategy {
 
     this.lastSkippedByEdge = [];
     this.lastSkippedByEliteAligned = [];
+    this.lastSkippedByFadePrice = [];
 
     const degens = (wallets || []).filter(w => w.tier === "DEGEN");
     const elites = (wallets || []).filter(w => w.tier === "ELITE");
@@ -161,6 +171,23 @@ export class AntiDegenStrategy extends BaseStrategy {
               fadeDrift: edge.entryEdge,
             });
             continue;
+          }
+
+          // Lottery-ticket gate: the fade-entry price is the opposite
+          // outcome's price ≈ 1 - currentPrice(origDir) for a binary market.
+          // When that's > maxFadeEntryPrice, the fade is a near-certain
+          // favorite (tiny upside, full downside) the book already prices
+          // efficiently — skip. edge.currentPrice is the origDir price.
+          if (cfg.maxFadeEntryPrice > 0 && edge.currentPrice != null) {
+            const fadeEntryPrice = 1 - edge.currentPrice;
+            if (fadeEntryPrice > cfg.maxFadeEntryPrice) {
+              this.lastSkippedByFadePrice.push({
+                conditionId, originalDirection: origDir,
+                degenCount: aligned.length,
+                fadeEntryPrice,
+              });
+              continue;
+            }
           }
 
           // INVERT direction for the fade signal

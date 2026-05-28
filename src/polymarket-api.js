@@ -177,6 +177,12 @@ export function normaliseMarket(m = {}) {
     tickSize:      Number(m.orderPriceMinTickSize || 0) || null,
     lastTradePrice: Number(m.lastTradePrice || 0) || null,
     bestAsk:       Number(m.bestAsk || 0) || null,
+    // endDate (ISO string) — needed by antidegen's maxSignalsPerResolveDay
+    // cluster filter to group same-resolution-day markets. Gamma exposes it
+    // as `endDate` (sometimes `endDateIso`); was previously dropped here, so
+    // the cluster filter silently no-op'd (verified 2026-05-21: 3 World Cup
+    // fades resolving the same final-day all fired in one scan).
+    endDate:       m.endDate || m.endDateIso || null,
     tokens,
   };
 }

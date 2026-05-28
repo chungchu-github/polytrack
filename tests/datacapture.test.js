@@ -286,6 +286,25 @@ describe("normaliseMarket (Gamma new-format adapter)", () => {
     assert.equal(m.tokens.length, 0);
     assert.deepEqual(m.outcomes, []);
   });
+
+  it("carries endDate through (antidegen cluster filter depends on it)", () => {
+    const m = normaliseMarket({
+      conditionId: "0xabc",
+      clobTokenIds: '["t1","t2"]',
+      outcomes: '["Yes","No"]',
+      outcomePrices: '["0.5","0.5"]',
+      endDate: "2026-07-19T22:00:00Z",
+    });
+    assert.equal(m.endDate, "2026-07-19T22:00:00Z");
+  });
+
+  it("falls back to endDateIso, else null", () => {
+    assert.equal(
+      normaliseMarket({ endDateIso: "2026-07-19T00:00:00Z" }).endDate,
+      "2026-07-19T00:00:00Z",
+    );
+    assert.equal(normaliseMarket({ clobTokenIds: '[]' }).endDate, null);
+  });
 });
 
 describe("captureMarketSnapshot — new Gamma shape round-trip", () => {

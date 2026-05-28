@@ -270,3 +270,44 @@ describe("antidegen — sample-quality gates (2026-05-12)", () => {
     assert.equal(sigs.length, 2);
   });
 });
+
+// ── 2026-05-21 lottery-ticket gate ──────────────────────────────────────────
+// New trades 7-10 (post 2-decimal fix) were World Cup favorite fades: DEGEN
+// bought a cheap long-shot YES @ ~0.09, we faded NO @ ~0.91 — tiny upside,
+// full downside, near-zero edge. maxFadeEntryPrice (default 0.85) skips them.
+describe("antidegen — lottery-ticket gate (maxFadeEntryPrice)", () => {
+  it("skips fade when entry price > maxFadeEntryPrice", () => {
+    // DEGEN buys YES @ 0.08 (long-shot). currentPrice(YES)=0.08 →
+    // fade NO entry = 1 - 0.08 = 0.92 > 0.85 default → skip.
+    const s = new AntiDegenStrategy({ minWallets: 1 });
+    const wallets = [w("0xd1", "DEGEN", [pos("C1", "Yes", 500, 0.08)])];
+    const sigs = s.detect({ wallets, markets: [event("C1", 0.08)] });
+    assert.equal(sigs.length, 0);
+    assert.equal(s.lastSkippedByFadePrice.length, 1);
+    assert.ok(s.lastSkippedByFadePrice[0].fadeEntryPrice > 0.85);
+  });
+
+  it("allows fade when entry price <= maxFadeEntryPrice", () => {
+    // DEGEN buys YES @ 0.30. fade NO entry = 0.70 <= 0.85 → allowed.
+    const s = new AntiDegenStrategy({ minWallets: 1 });
+    const wallets = [w("0xd1", "DEGEN", [pos("C1", "Yes", 500, 0.30)])];
+    const sigs = s.detect({ wallets, markets: [event("C1", 0.30)] });
+    assert.equal(sigs.length, 1);
+    assert.equal(sigs[0].direction, "NO");
+  });
+
+  it("maxFadeEntryPrice=0 disables the gate (allows high-price fade)", () => {
+    const s = new AntiDegenStrategy({ minWallets: 1, maxFadeEntryPrice: 0 });
+    const wallets = [w("0xd1", "DEGEN", [pos("C1", "Yes", 500, 0.08)])];
+    const sigs = s.detect({ wallets, markets: [event("C1", 0.08)] });
+    assert.equal(sigs.length, 1);
+  });
+
+  it("boundary: fade entry exactly at threshold is allowed", () => {
+    // DEGEN YES @ 0.15 → fade NO entry = 0.85, NOT > 0.85 → allowed.
+    const s = new AntiDegenStrategy({ minWallets: 1, maxFadeEntryPrice: 0.85 });
+    const wallets = [w("0xd1", "DEGEN", [pos("C1", "Yes", 500, 0.15)])];
+    const sigs = s.detect({ wallets, markets: [event("C1", 0.15)] });
+    assert.equal(sigs.length, 1);
+  });
+});
