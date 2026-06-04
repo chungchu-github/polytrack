@@ -23,6 +23,7 @@ import {
   classifyClobOrderStatus, evaluateExit,
   buildPoly1271Signature,
   SIGNATURE_TYPE_POLY_1271,
+  computeLimitPrice, tradeOutcomeClass,
 } from "../src/trading.js";
 
 const TEST_WALLET = ethers.Wallet.createRandom();
@@ -837,5 +838,60 @@ describe("trading — POLY_1271 Solady packed signature", () => {
       domain,
     });
     assert.equal(ethers.getBytes(sig).length, 65);
+  });
+});
+
+// ── computeLimitPrice — CLOB price-bounds guard (2026-06 invalid-price fix) ──
+// Root cause of the dominant historical "invalid price, must be >0 and <1"
+// rejection: slippage + ceil-to-tick pushes a high-mid fade's BUY limit to
+// >= 1.0 (e.g. Colombia WC fade: mid ~0.98 -> 1.00). The CLOB rejects it,
+// which then tripped the circuit breaker. Reproduced on 2026-05-21
+// (Brazil mid 0.92 -> 0.939 FILLED; Colombia mid 0.98 -> 1.00 FAILED).
+describe("computeLimitPrice (CLOB 0<price<1 guard)", () => {
+  it("slips up and rounds to tick for a normal mid", () => {
+    // 0.50 * 1.02 = 0.51 -> ceil to 0.01 tick = 0.51
+    assert.equal(computeLimitPrice(0.50, 2, 0.01), 0.51);
+  });
+
+  it("returns null when slippage+rounding would push the limit to >= 1", () => {
+    // 0.98 * 1.02 = 0.9996 -> ceil to tick = 1.00 -> out of (0,1) -> null
+    assert.equal(computeLimitPrice(0.98, 2, 0.01), null);
+    assert.equal(computeLimitPrice(0.995, 2, 0.01), null);
+  });
+
+  it("a high-but-valid fade still passes (mid 0.92 -> < 1)", () => {
+    const p = computeLimitPrice(0.92, 2, 0.01);
+    assert.ok(p > 0 && p < 1, `expected price in (0,1), got ${p}`);
+  });
+
+  it("returns null for non-positive / non-finite mid", () => {
+    assert.equal(computeLimitPrice(0, 2, 0.01), null);
+    assert.equal(computeLimitPrice(-0.1, 2, 0.01), null);
+    assert.equal(computeLimitPrice(NaN, 2, 0.01), null);
+  });
+
+  it("defaults tick to 0.01 when unknown/zero", () => {
+    assert.equal(computeLimitPrice(0.50, 2, 0), 0.51);
+    assert.equal(computeLimitPrice(0.50, 2, null), 0.51);
+  });
+});
+
+// ── tradeOutcomeClass — circuit-breaker classification (2026-06) ─────────────
+// The breaker was tripping on benign "market not tradeable" conditions
+// (preflight rejects, limit>=1) counted as execution failures, repeatedly
+// auto-disabling auto-copy. SKIPPED must be benign: neither resets nor trips.
+describe("tradeOutcomeClass (circuit-breaker)", () => {
+  it("fills reset the streak", () => {
+    for (const s of ["FILLED", "PARTIAL", "SIMULATED"]) {
+      assert.equal(tradeOutcomeClass(s), "fill");
+    }
+  });
+  it("SKIPPED is benign (market not tradeable, not a failure)", () => {
+    assert.equal(tradeOutcomeClass("SKIPPED"), "skip");
+  });
+  it("genuine non-fills count as failures", () => {
+    for (const s of ["FAILED", "SUBMITTED", "ERROR", "OPEN", "UNKNOWN"]) {
+      assert.equal(tradeOutcomeClass(s), "fail");
+    }
   });
 });

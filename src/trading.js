@@ -628,6 +628,37 @@ export async function preflightCheck(signal, tokenId, sizeUsdc) {
   return { ok: true, midPrice, availableDepth: null, negRisk, tickSize, minSize };
 }
 
+/**
+ * Slippage-adjusted, tick-rounded BUY limit price. Returns a price strictly
+ * inside (0,1), or null when the slipped+rounded price would land outside that
+ * range — a high-mid fade (e.g. 0.98 → 1.00 after 2% slippage + ceil-to-tick)
+ * is exactly what the CLOB rejects as "invalid price, must be >0 and <1".
+ * Extracted from executeCopyTrade so the bounds guard is unit-testable.
+ */
+export function computeLimitPrice(midPrice, slippagePct = 2, tickSize = 0.01) {
+  if (!Number.isFinite(midPrice) || midPrice <= 0) return null;
+  const tick = tickSize && tickSize > 0 ? tickSize : 0.01;
+  const raw  = midPrice * (1 + slippagePct / 100);
+  const limit = Math.round(Math.ceil(raw / tick) * tick * 1e6) / 1e6;
+  return (limit > 0 && limit < 1) ? limit : null;
+}
+
+/**
+ * Classify a trade result for the auto-copy circuit breaker:
+ *   "fill" — order filled        → reset the failure streak
+ *   "skip" — market not tradeable (preflight reject / limit out of bounds) →
+ *            BENIGN, must not count toward the breaker
+ *   "fail" — genuine execution failure (CLOB rejected a well-formed order,
+ *            network/signing error, unfilled) → counts toward the breaker
+ * 2026-06: introduced because the breaker was tripping on benign "untradeable
+ * market" conditions, repeatedly auto-disabling auto-copy.
+ */
+export function tradeOutcomeClass(status) {
+  if (status === "FILLED" || status === "PARTIAL" || status === "SIMULATED") return "fill";
+  if (status === "SKIPPED") return "skip";
+  return "fail";
+}
+
 // ── Execute Copy Trade ───────────────────────────────────────────────────────
 
 /**
@@ -659,25 +690,42 @@ export async function executeCopyTrade(signal, config) {
     };
   }
 
+  // Benign "can't trade this market right now" outcomes return SKIPPED (not a
+  // throw, not FAILED) so the caller distinguishes them from real execution
+  // failures — the circuit breaker must NOT trip on these. See tradeOutcomeClass.
+  const skipped = (reason) => ({
+    conditionId: signal.conditionId,
+    title:       signal.title,
+    direction:   signal.direction,
+    walletCount: signal.walletCount,
+    strength:    signal.strength,
+    status:      "SKIPPED",
+    error:       reason,
+    executedAt:  Date.now(),
+  });
+
   // 1. Resolve token ID by outcome name
   const tokenId = resolveTokenId(signal.market, signal.direction);
   if (!tokenId) {
-    throw new Error(`Could not resolve token ID for ${signal.direction} in market ${signal.conditionId}`);
+    return skipped(`could not resolve token id for ${signal.direction} in ${signal.conditionId}`);
   }
 
   // 2. Preflight: market active, mid-price valid, orderbook depth sufficient
   const pre = await preflightCheck(signal, tokenId, maxTradeUsdc);
   if (!pre.ok) {
-    throw new Error(`Preflight failed: ${pre.reason}`);
+    return skipped(`preflight: ${pre.reason}`);
   }
   const midPrice = pre.midPrice;
 
-  // 3. Apply slippage: for BUY we're willing to pay up to mid * (1 + slippage%),
-  //    rounded to the market's tick_size (default 0.01 when unknown). Rounding
-  //    down below the slipped price would risk no-fills, so we always round up.
-  const tick = pre.tickSize && pre.tickSize > 0 ? pre.tickSize : 0.01;
-  const raw  = midPrice * (1 + slippagePct / 100);
-  const limitPrice = Math.round(Math.ceil(raw / tick) * tick * 1e6) / 1e6;
+  // 3. Slippage-adjusted, tick-rounded BUY limit. computeLimitPrice returns
+  //    null when the slipped price would land outside (0,1) — e.g. a high-mid
+  //    fade rounds up to 1.00, which the CLOB rejects as "invalid price".
+  //    Skip rather than submit a knowingly-invalid order (which used to fail
+  //    at the CLOB and trip the circuit breaker).
+  const limitPrice = computeLimitPrice(midPrice, slippagePct, pre.tickSize);
+  if (limitPrice == null) {
+    return skipped(`limit price out of (0,1) for mid ${midPrice} — market too one-sided`);
+  }
 
   // 4. Build and sign V2 order.
   //    Neg-risk routing: multi-outcome markets go through NEG_RISK_EXCHANGE V2.

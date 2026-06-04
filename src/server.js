@@ -29,7 +29,7 @@ import { scoreWallet } from "./scoring.js";
 import {
   executeCopyTrade, resolveTokenId, preflightCheck,
   buildUnsignedOrder, signOrder, wrapOrderPayload,
-  classifyClobOrderStatus, evaluateExit,
+  classifyClobOrderStatus, evaluateExit, tradeOutcomeClass,
 } from "./trading.js";
 import { checkResolutions, getSignalAccuracy } from "./resolution.js";
 import { checkRiskLimits, getRiskSnapshot } from "./risk.js";
@@ -701,14 +701,27 @@ async function runScan() {
             slippagePct: cfg.slippagePct,
           });
           trade.strategy = strategyName;
+
+          const outcome = tradeOutcomeClass(trade.status);
+          if (outcome === "skip") {
+            // Market not tradeable right now (preflight reject / limit out of
+            // bounds). Benign — must NOT count toward the breaker. Unlock so the
+            // signal can re-fire once conditions change; not recorded (would
+            // bloat `trades` with non-events).
+            state.strategyEngine.unmarkTraded(strategyName, sig.conditionId, sig.direction);
+            log.info(`[skip] [${trade.direction}] ${trade.title?.slice(0,40)} — ${trade.error}`);
+            continue;
+          }
+
           addTrade(state, trade);  // persists to DB
           emit("trade:executed", trade);
           alertTradeExecuted(trade);
           tradesExecuted++;
           log.trade(`Executed: [${trade.direction}] ${trade.title?.slice(0,40)} — $${trade.size} — ${trade.status}`);
 
-          // Circuit breaker: reset streak on success; count FAILED/UNKNOWN as failures
-          if (trade.status === "FILLED" || trade.status === "PARTIAL" || trade.status === "SIMULATED") {
+          // Circuit breaker: reset on fill; a genuine non-fill (FAILED / UNKNOWN
+          // / unfilled SUBMITTED) counts as a failure. SKIPPED handled above.
+          if (outcome === "fill") {
             tradeFailureStreak = 0;
           } else {
             tradeFailureStreak++;
