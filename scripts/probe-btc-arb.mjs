@@ -57,19 +57,20 @@ async function discoverViaEvents() {
 
 async function discoverAll() {
   const out = []; let scanned = 0;
-  for (let page = 0; page < 40; page++) {
+  const PAGE = 100;            // gamma caps page size at ~100 regardless of limit
+  for (let page = 0; page < 80; page++) {   // up to 8000 active markets
     let arr;
     try {
-      const r = await fetch(`${GAMMA}?active=true&closed=false&limit=500&offset=${page * 500}`, { signal: AbortSignal.timeout(15000) });
+      const r = await fetch(`${GAMMA}?active=true&closed=false&limit=${PAGE}&offset=${page * PAGE}`, { signal: AbortSignal.timeout(15000) });
       arr = await r.json();
     } catch { break; }
-    if (!Array.isArray(arr) || arr.length === 0) break;
+    if (!Array.isArray(arr) || arr.length === 0) break;   // genuine end
     scanned += arr.length;
     for (const m of arr) if (isBtc(m)) out.push(normaliseMarket(m));
-    if (arr.length < 500) break;
-    await sleep(150);
+    if (arr.length < PAGE) break;                          // short last page
+    await sleep(120);
   }
-  return { markets: out, scanned, mode: "ALL active markets (gamma /markets, paginated)" };
+  return { markets: out, scanned, mode: `ALL active markets (gamma /markets, paginated x${PAGE})` };
 }
 
 async function main() {
