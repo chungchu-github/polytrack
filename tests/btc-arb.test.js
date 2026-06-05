@@ -13,8 +13,13 @@ describe("parseBtcMarket", () => {
   it("parses a threshold market with full date", () => {
     const r = parseBtcMarket("Will Bitcoin reach $150,000 by December 31, 2026?");
     assert.equal(r.kind, "threshold");
+    assert.equal(r.side, "up");
     assert.equal(r.targetUsd, 150000);
     assert.equal(r.dateMs, Date.parse("December 31, 2026"));
+  });
+  it("classifies reach/hit as up side, dip/drop as down side", () => {
+    assert.equal(parseBtcMarket("Will Bitcoin reach $100,000 by Dec 31, 2026?").side, "up");
+    assert.equal(parseBtcMarket("Will Bitcoin dip to $25,000 by December 31, 2026?").side, "down");
   });
   it("expands $k and $m suffixes", () => {
     assert.equal(parseBtcMarket("BTC above $100k on Jul 31?").targetUsd, 100000);
@@ -25,7 +30,7 @@ describe("parseBtcMarket", () => {
     assert.equal(parseBtcMarket("Bitcoin Up or Down — July 4, 8PM ET").kind, "direction");
   });
   it("returns unknown for non-threshold, non-direction", () => {
-    assert.deepEqual(parseBtcMarket("Will the Lakers win?"), { kind: "unknown", targetUsd: null, dateMs: null });
+    assert.deepEqual(parseBtcMarket("Will the Lakers win?"), { kind: "unknown", side: null, targetUsd: null, dateMs: null });
   });
   it("threshold with no parseable date keeps targetUsd, dateMs null", () => {
     const r = parseBtcMarket("Will Bitcoin hit $200,000 eventually?");
@@ -92,12 +97,32 @@ describe("consistency checks", () => {
     ]);
     assert.equal(checkCalendarMonotonicity(fam.calendar, 0).length, 0);
   });
-  it("threshold: flags P(>low) < P(>high) for same date", () => {
+  it("threshold up-side: flags P(reach low) < P(reach high) for same date", () => {
     const d = Date.parse("2026-06-30");
     const fam = groupFamilies([mk("a", 90000, d, 0.30), mk("b", 100000, d, 0.40)]);
     const v = checkThresholdMonotonicity(fam.threshold, 0);
     assert.equal(v.length, 1);
     assert.ok(Math.abs(v[0].magnitude - 0.10) < 1e-9);
+  });
+  it("threshold down-side: a dip-to family rising with target is OK (NOT a violation)", () => {
+    const d = Date.parse("2026-12-31");
+    const down = (id, t, p) => ({ kind: "threshold", side: "down", conditionId: id, targetUsd: t, dateMs: d, prob: p, question: id });
+    const fam = groupFamilies([down("a", 25000, 0.10), down("b", 50000, 0.30)]); // higher floor = higher prob: correct
+    assert.equal(checkThresholdMonotonicity(fam.threshold, 0).length, 0);
+  });
+  it("threshold down-side: flags a dip-to family that falls with target", () => {
+    const d = Date.parse("2026-12-31");
+    const down = (id, t, p) => ({ kind: "threshold", side: "down", conditionId: id, targetUsd: t, dateMs: d, prob: p, question: id });
+    const fam = groupFamilies([down("a", 25000, 0.30), down("b", 50000, 0.10)]);
+    assert.equal(checkThresholdMonotonicity(fam.threshold, 0).length, 1);
+  });
+  it("never compares up vs down within one date family", () => {
+    const d = Date.parse("2026-12-31");
+    const fam = groupFamilies([
+      { kind: "threshold", side: "down", conditionId: "a", targetUsd: 50000, dateMs: d, prob: 0.20, question: "dip 50k" },
+      { kind: "threshold", side: "up",   conditionId: "b", targetUsd: 100000, dateMs: d, prob: 0.90, question: "reach 100k" },
+    ]);
+    assert.equal(checkThresholdMonotonicity(fam.threshold, 0).length, 0); // separate single-element families
   });
   it("ignores direction and date-less markets", () => {
     const fam = groupFamilies([

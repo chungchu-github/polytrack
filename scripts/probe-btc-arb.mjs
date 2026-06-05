@@ -143,7 +143,7 @@ async function main() {
   if (cal.length) console.table(cal.map(v => ({ target: v.targetUsd, mag: v.magnitude.toFixed(3), earlier: v.earlier.question?.slice(0, 28), later: v.later.question?.slice(0, 28) })));
   console.log(`\n── D: threshold monotonicity violations (>${TOL}) ──`);
   console.log(thr.length ? "" : "none.");
-  if (thr.length) console.table(thr.map(v => ({ date: new Date(Number(v.dateKey)).toISOString().slice(0, 10), mag: v.magnitude.toFixed(3), low: v.lower.question?.slice(0, 28), high: v.higher.question?.slice(0, 28) })));
+  if (thr.length) console.table(thr.map(v => ({ date: new Date(Number(v.dateKey)).toISOString().slice(0, 10), side: v.side, mag: v.magnitude.toFixed(3), low: v.lower.question?.slice(0, 28), high: v.higher.question?.slice(0, 28) })));
 
   console.log(`\nBooks: ${booksOk} fetched, ${booksFail} failed (404/no-book).`);
 

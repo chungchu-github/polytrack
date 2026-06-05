@@ -13,23 +13,30 @@ function parseDate(t) {
 }
 
 /**
- * Parse a BTC market title into { kind, targetUsd, dateMs }.
+ * Parse a BTC market title into { kind, side, targetUsd, dateMs }.
  *   kind: "threshold" | "direction" | "unknown"
+ *   side: "up" (reach/hit/above) | "down" (dip/drop/below/under) | null
  *   targetUsd: number (k/m suffixes expanded) | null
  *   dateMs: epoch ms of the resolve date | null
  */
 export function parseBtcMarket(title) {
   const t = String(title || "");
-  if (/up or down/i.test(t)) return { kind: "direction", targetUsd: null, dateMs: parseDate(t) };
+  if (/up or down/i.test(t)) return { kind: "direction", side: null, targetUsd: null, dateMs: parseDate(t) };
   const m = t.match(/\$\s?([\d,]+(?:\.\d+)?)\s?(k|m)?\b/i);
   if (m) {
     let v = Number(m[1].replace(/,/g, ""));
     const unit = (m[2] || "").toLowerCase();
     if (unit === "k") v *= 1e3;
     else if (unit === "m") v *= 1e6;
-    if (Number.isFinite(v) && v > 0) return { kind: "threshold", targetUsd: v, dateMs: parseDate(t) };
+    if (Number.isFinite(v) && v > 0) {
+      // Downside ("dip/drop/fall to", "below/under $X") = P(BTC <= target);
+      // upside ("reach/hit/above", default) = P(BTC >= target). They obey
+      // OPPOSITE monotonicity in target — mixing them flags false violations.
+      const side = /\b(dip|drop|fall|below|under)\b/i.test(t) ? "down" : "up";
+      return { kind: "threshold", side, targetUsd: v, dateMs: parseDate(t) };
+    }
   }
-  return { kind: "unknown", targetUsd: null, dateMs: null };
+  return { kind: "unknown", side: null, targetUsd: null, dateMs: null };
 }
 
 /**
@@ -85,40 +92,51 @@ export function groupFamilies(markets) {
   const threshold = new Map();
   for (const m of markets || []) {
     if (m.kind !== "threshold" || m.targetUsd == null || m.dateMs == null) continue;
-    if (!calendar.has(m.targetUsd)) calendar.set(m.targetUsd, []);
-    calendar.get(m.targetUsd).push(m);
-    const dk = String(m.dateMs);
-    if (!threshold.has(dk)) threshold.set(dk, []);
-    threshold.get(dk).push(m);
+    const side = m.side || "up";
+    const calKey = `${side}::${m.targetUsd}`;   // same side+target, vary date
+    if (!calendar.has(calKey)) calendar.set(calKey, []);
+    calendar.get(calKey).push(m);
+    const thrKey = `${side}::${m.dateMs}`;       // same side+date, vary target
+    if (!threshold.has(thrKey)) threshold.set(thrKey, []);
+    threshold.get(thrKey).push(m);
   }
   return { calendar, threshold };
 }
 
-/** P(by earlier date) must be <= P(by later date) for the same target. */
+/**
+ * P(by earlier date) must be <= P(by later date) for the same (side, target):
+ * more time = more chances to have reached/dipped. Same rule for up and down.
+ */
 export function checkCalendarMonotonicity(calendar, tol = 0) {
   const violations = [];
-  for (const [targetUsd, list] of calendar) {
+  for (const [, list] of calendar) {
     const sorted = [...list].sort((a, b) => a.dateMs - b.dateMs);
     for (let i = 1; i < sorted.length; i++) {
       const earlier = sorted[i - 1], later = sorted[i];
       if (earlier.prob > later.prob + tol) {
-        violations.push({ targetUsd, earlier, later, magnitude: earlier.prob - later.prob });
+        violations.push({ targetUsd: earlier.targetUsd, side: earlier.side, earlier, later, magnitude: earlier.prob - later.prob });
       }
     }
   }
   return violations;
 }
 
-/** P(> lower target) must be >= P(> higher target) for the same date. */
+/**
+ * Same-date strike monotonicity, side-aware (families never mix up/down):
+ *   up   — P(reach $low)  >= P(reach $high)   → violation if it rises with target
+ *   down — P(dip to $low) <= P(dip to $high)  → violation if it falls with target
+ */
 export function checkThresholdMonotonicity(threshold, tol = 0) {
   const violations = [];
-  for (const [dateKey, list] of threshold) {
+  for (const [, list] of threshold) {
+    const side = list[0]?.side || "up";
     const sorted = [...list].sort((a, b) => a.targetUsd - b.targetUsd);
     for (let i = 1; i < sorted.length; i++) {
       const lower = sorted[i - 1], higher = sorted[i];
-      if (lower.prob < higher.prob - tol) {
-        violations.push({ dateKey, lower, higher, magnitude: higher.prob - lower.prob });
-      }
+      const bad = side === "down"
+        ? (lower.prob > higher.prob + tol)   // down: prob should rise with target
+        : (lower.prob < higher.prob - tol);  // up:   prob should fall with target
+      if (bad) violations.push({ side, dateKey: String(lower.dateMs), lower, higher, magnitude: Math.abs(higher.prob - lower.prob) });
     }
   }
   return violations;
